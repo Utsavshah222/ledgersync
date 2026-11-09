@@ -12,7 +12,7 @@ val keyProps = Properties().apply {
     val f = rootProject.file("keystore.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
-fun signing(name: String, env: String): String? = keyProps.getProperty(name) ?: System.getenv(env)
+fun signing(name: String, env: String): String? = (keyProps.getProperty(name) ?: System.getenv(env))?.trim()?.ifEmpty { null }
 
 android {
     namespace = "com.ledgersync.app"
