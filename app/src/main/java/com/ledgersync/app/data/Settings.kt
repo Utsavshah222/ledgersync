@@ -19,7 +19,7 @@ class Settings private constructor(context: Context) {
     init { sp.registerOnSharedPreferenceChangeListener(listener) }
 
     var scriptUrl: String
-        get() = sp.getString("scriptUrl", "") ?: ""
+        get() = sp.getString("scriptUrl", null)?.takeIf { it.isNotBlank() } ?: com.ledgersync.app.BuildConfig.DEFAULT_SCRIPT_URL
         set(v) = sp.edit().putString("scriptUrl", v.trim()).apply()
 
     var secretKey: String

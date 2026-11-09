@@ -26,7 +26,12 @@ android {
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
         versionName = (project.findProperty("versionName") as String?) ?: "1.0.0"
         // "owner/repo" used by the in-app update check against GitHub Releases.
-        buildConfigField("String", "GITHUB_REPO", "\"${project.findProperty("githubRepo") ?: ""}\"")
+        buildConfigField("String", "GITHUB_REPO", "\"${project.findProperty("githubRepo") ?: "Utsavshah222/ledgersync"}\"")
+        // Pre-filled on every phone so only the secret key has to be entered.
+        buildConfigField(
+            "String", "DEFAULT_SCRIPT_URL",
+            "\"https://script.google.com/macros/s/AKfycbycALS2aqb8trvSf3PGv_NsYBagb7F0D8z3C9jo2wmZt_gtI87UyXSoEVpfm_RZ9DWv/exec\"",
+        )
     }
 
     signingConfigs {

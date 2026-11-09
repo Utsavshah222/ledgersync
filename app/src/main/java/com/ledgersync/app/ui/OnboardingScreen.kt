@@ -248,7 +248,7 @@ private fun ConnectStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Uni
         Spacer(Modifier.height(16.dp))
         Text("Connect Google Sheet", style = MaterialTheme.typography.headlineMedium, color = LS.Text)
         Spacer(Modifier.height(6.dp))
-        Text("In the sheet open  LedgerSync ▸ Connection details  and copy the two values below.", color = LS.Muted, style = MaterialTheme.typography.bodyMedium)
+        Text("The sheet link is already filled in. Just paste the secret key from  LedgerSync ▸ Connection details  in the sheet.", color = LS.Muted, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(22.dp))
         LsTextField(url, { url = it.trim() }, "Web App URL", leading = Icons.Rounded.Link, supporting = "https://script.google.com/macros/s/…/exec")
         Spacer(Modifier.height(6.dp))
