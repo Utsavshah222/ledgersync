@@ -32,6 +32,8 @@ LedgerSync is an Android app. It captures every **debit and credit SMS** for the
 You can also add accounts from the app later. The full number is best, but the last 4 digits are enough.
 
 > If you change `Code.gs` later, use **Deploy ▸ Manage deployments ▸ Edit ▸ New version**. That keeps the same URL.
+>
+> If you edit or delete transaction rows by hand, run **LedgerSync ▸ Recalculate app totals** so the app's totals match.
 
 ## 2. Install the app on each phone
 
@@ -55,8 +57,9 @@ You can also add accounts from the app later. The full number is best, but the l
 
 ## 4. App features
 
-- **Home:** total balance with a Company / Personal / All filter; money in, money out and net for This Month, This Year or All Time; per-account cards; live sync status.
-- **Activity:** every captured entry, grouped by day, with search and filters. Tap an entry to see full details and the original SMS.
+- **Home:** total balance of every account with a Company / Personal / All filter; money in, money out and net for This Month, This Year or All Time; per-account cards; the newest entries from all phones; live sync status.
+- **Activity:** the full transaction history from **all devices**, 25 at a time (more loads as you scroll), grouped by day, with search and account / money-in / money-out filters. Switch to **This phone** to see only what this phone captured, including entries still waiting for internet. Tap an entry to see full details, which phone captured it, and the original SMS.
+- **Works offline:** with no internet, new SMS are queued on the phone and the balances and totals update straight away. Everything uploads automatically when the phone is back online. Screens open instantly from a saved copy and refresh in the background.
 - **Accounts:** the tracked accounts, plus adding new ones (they sync to every phone).
 - **Settings:** connection, sync now, history import, battery and autostart help, and the **Parser Lab**. Paste any bank SMS into the Parser Lab to see exactly how it will be read.
 

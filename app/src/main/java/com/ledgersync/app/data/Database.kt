@@ -71,7 +71,33 @@ interface TxnDao {
 
     @Query("DELETE FROM txns")
     suspend fun clear()
+
+    @Query("SELECT * FROM txns ORDER BY timestamp DESC LIMIT :limit")
+    fun observeRecent(limit: Int): Flow<List<TxnEntity>>
+
+    /** Entries the sheet's last summary doesn't include yet: still queued, or uploaded after that summary was fetched. */
+    @Query("SELECT * FROM txns WHERE syncState IN (0,3) OR (syncState = 1 AND syncedAt > :since) ORDER BY timestamp DESC")
+    fun observeUnsettled(since: Long): Flow<List<TxnEntity>>
+
+    /** One growing window of this phone's history; [limit] is pages × 25. */
+    @Query("SELECT * FROM txns WHERE $FILTER ORDER BY timestamp DESC LIMIT :limit")
+    fun observePage(account: String?, type: String?, unsynced: Boolean, q: String, limit: Int): Flow<List<TxnEntity>>
+
+    @Query(
+        "SELECT COUNT(*) AS count, COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount END), 0) AS credit, " +
+            "COALESCE(SUM(CASE WHEN type = 'DEBIT' THEN amount END), 0) AS debit FROM txns WHERE $FILTER"
+    )
+    fun observeTotals(account: String?, type: String?, unsynced: Boolean, q: String): Flow<LocalTotals>
+
+    companion object {
+        private const val LIKE_Q = "LIKE '%' || :q || '%'"
+        const val FILTER = "(:account IS NULL OR accountNick = :account) AND (:type IS NULL OR type = :type) " +
+            "AND (:unsynced = 0 OR syncState IN (0,3)) " +
+            "AND (:q = '' OR party $LIKE_Q OR accountNick $LIKE_Q OR mode $LIKE_Q OR reference $LIKE_Q OR body $LIKE_Q OR CAST(amount AS TEXT) $LIKE_Q)"
+    }
 }
+
+data class LocalTotals(val count: Int, val credit: Double, val debit: Double)
 
 @Database(entities = [TxnEntity::class], version = 1, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {

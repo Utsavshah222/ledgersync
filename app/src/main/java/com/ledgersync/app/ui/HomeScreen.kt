@@ -68,14 +68,16 @@ private val owners = listOf("All", "Company", "Personal")
 @Composable
 fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: () -> Unit, onOpenSettings: () -> Unit) {
     val dash by vm.dashboard.collectAsState()
-    val txns by vm.txns.collectAsState()
+    val recentLocal by vm.recentLocal.collectAsState()
+    val recentShared by vm.recentShared.collectAsState()
+    val queued by vm.queued.collectAsState()
     val pending by vm.pending.collectAsState()
     val failed by vm.failed.collectAsState()
     val syncing by vm.syncing.collectAsState()
     vm.settings.version.collectAsState().value
     var ownerIdx by rememberSaveable { mutableIntStateOf(0) }
     var periodIdx by rememberSaveable { mutableIntStateOf(0) }
-    var detail by remember { mutableStateOf<TxnEntity?>(null) }
+    var detail by remember { mutableStateOf<Pair<TxnEntity, String?>?>(null) }
     val update by vm.update.collectAsState()
     val ctx = LocalContext.current
 
@@ -84,6 +86,16 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
     val shown = if (ownerIdx == 0) all else all.filter { it.owner.equals(owners[ownerIdx], true) }
     val totals = shown.fold(PeriodStats()) { a, s -> a + s.period(period) }
     val totalBalance = shown.sumOf { it.balance ?: 0.0 }
+    // Newest from every phone (queued entries on this phone first); falls back to this phone before the first sync.
+    val recent: List<Pair<TxnEntity, String?>> = remember(recentShared, queued, recentLocal) {
+        if (recentShared.isEmpty() && queued.isEmpty()) recentLocal.map { it to null }
+        else {
+            val keys = queued.mapTo(HashSet()) { it.txnKey }
+            (queued.map { it to null } + recentShared.filter { it.txn.txnKey !in keys }.map { it.txn to it.device })
+                .sortedByDescending { it.first.timestamp }.take(6)
+        }
+    }
+    val recentFromAll = recentShared.isNotEmpty()
 
     PullToRefreshBox(isRefreshing = syncing, onRefresh = { vm.syncNow(true) }, modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -140,12 +152,16 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
                 }
             }
             items(shown, key = { "acc-" + it.nickname }) { a ->
-                AccountCard(a, period)
+                AccountCard(a, period) { vm.showAccountHistory(a.nickname); onOpenActivity() }
                 Spacer(Modifier.height(10.dp))
             }
 
-            item { SectionHeader("Captured on this phone", if (txns.isNotEmpty()) "See all" else null, onOpenActivity) }
-            if (txns.isEmpty()) {
+            item {
+                SectionHeader(if (recentFromAll) "Recent · all devices" else "Captured on this phone", if (recent.isNotEmpty()) "See all" else null) {
+                    vm.showAccountHistory(null); onOpenActivity()
+                }
+            }
+            if (recent.isEmpty()) {
                 item {
                     GlassCard {
                         EmptyState(
@@ -158,13 +174,13 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
             } else {
                 item {
                     GlassCard(padding = 8.dp) {
-                        txns.take(6).forEach { t -> TxnRow(t) { detail = t } }
+                        recent.forEach { e -> TxnRow(e.first) { detail = e } }
                     }
                 }
             }
         }
     }
-    detail?.let { TxnDetailSheet(it) { detail = null } }
+    detail?.let { (t, device) -> TxnDetailSheet(t, device) { detail = null } }
 }
 
 @Composable
@@ -256,7 +272,7 @@ private fun NetCard(t: PeriodStats) {
 }
 
 @Composable
-private fun AccountCard(a: AccountSummary, period: Period) {
+private fun AccountCard(a: AccountSummary, period: Period, onHistory: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val p = a.period(period)
     GlassCard(onClick = { expanded = !expanded }, padding = 16.dp) {
@@ -290,6 +306,11 @@ private fun AccountCard(a: AccountSummary, period: Period) {
                     MiniStat("Net", (if (p.net >= 0) "+" else "−") + formatInr(kotlin.math.abs(p.net)), if (p.net >= 0) LS.Credit else LS.Debit, Modifier.weight(1f))
                     MiniStat("Balance as of", a.balanceAsOf?.let { relativeTime(it) } ?: "—", LS.Text, Modifier.weight(1f))
                 }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "View transactions →", color = LS.PrimarySoft, style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.clip(RoundedCornerShape(50)).clickable(onClick = onHistory).padding(vertical = 6.dp),
+                )
             }
         }
         if (!expanded) {

@@ -25,7 +25,12 @@ const A = { NICK: 1, BANK: 2, NUM: 3, OWNER: 4, ALIASES: 5, PAUSED: 6, BAL: 7, B
 const FMT = '"₹"#,##0.00';
 const FMT_NET = '"₹"#,##0.00;[Red]-"₹"#,##0.00';
 
-const TZ = () => Session.getScriptTimeZone() || 'Asia/Kolkata';
+let tz_ = null;
+const TZ = () => tz_ || (tz_ = Session.getScriptTimeZone() || 'Asia/Kolkata');
+
+const API_VERSION = 2;
+const PAGE = 25;            // default page size for the app's history lists
+const CACHE_TTL = 600;      // seconds; every write bumps REV so cached replies never go stale
 const COLORS = { header: '#1E1B4B', headerText: '#FFFFFF', credit: '#0F9D58', debit: '#D93025', band: '#F5F3FF', accent: '#6D4BFF' };
 
 // ============================================================ MENU / SETUP
@@ -35,6 +40,7 @@ function onOpen() {
     .addItem('Connection details (for the app)', 'showConnection')
     .addItem('Rebuild Dashboard & Monthly', 'rebuildReports')
     .addItem('Re-sort all sheets (newest first)', 'resortAll')
+    .addItem('Recalculate app totals (after hand edits)', 'recalcTotals')
     .addSeparator()
     .addItem('Run first-time setup', 'setup')
     .addItem('Generate NEW secret key (disconnects phones)', 'rotateSecret')
@@ -90,9 +96,11 @@ function doGet(e) {
     auth_(p.key);
     const ss = SpreadsheetApp.getActive();
     switch (p.action) {
-      case 'ping': return { sheet: ss.getName(), accounts: readAccounts_(ss).length, time: new Date().toISOString() };
+      case 'ping': return { sheet: ss.getName(), accounts: readAccounts_(ss).length, api: API_VERSION, time: new Date().toISOString() };
       case 'config': syncReportsIfAccountsChanged_(ss); return { accounts: readAccounts_(ss).map(publicAccount_) };
       case 'summary': return summary_(ss);
+      case 'home': return home_(ss);
+      case 'history': return history_(ss, p);
       default: throw new Error('Unknown action');
     }
   });
@@ -136,6 +144,7 @@ function push_(ss, body) {
   lock.waitLock(30000);
   try {
     const master = ensureTxnSheet_(ss, TAB.MASTER);
+    const before = Math.max(master.getLastRow() - 1, 0);
     const existing = new Set(readIds_(master));
     const accounts = readAccounts_(ss);
     const byNick = {};
@@ -144,7 +153,7 @@ function push_(ss, body) {
     const now = new Date();
     const rows = [];
     const perAccount = {};
-    const latestBal = {};
+    const moves = {};
 
     txns.forEach(t => {
       const id = String(t.id || '').trim();
@@ -175,14 +184,16 @@ function push_(ss, body) {
       ];
       rows.push(row);
       (perAccount[nick] = perAccount[nick] || []).push(row);
-      if (bal !== '' && (!latestBal[nick] || dt > latestBal[nick].dt)) latestBal[nick] = { dt: dt, bal: bal };
+      (moves[nick] = moves[nick] || []).push({ dt: dt, delta: credit ? amount : -amount, bal: bal });
       results[id] = 'added';
     });
 
     if (rows.length) {
       appendSorted_(master, rows);
       Object.keys(perAccount).forEach(nick => appendSorted_(ensureTxnSheet_(ss, sheetNameFor_(nick)), perAccount[nick]));
-      updateBalances_(ss, latestBal);
+      updateBalances_(ss, moves);
+      addToStats_(rows, before);
+      bumpRev_();
     }
     touchDevice_(ss, device, rows.length);
     return { results: results, added: rows.length };
@@ -191,11 +202,41 @@ function push_(ss, body) {
   }
 }
 
+/**
+ * Keeps every transaction tab newest-first without re-sorting the whole sheet each time.
+ * Live SMS are always newer than the top row, so they slide in right under the header (fast path).
+ * Back-dated rows (history import) are appended and the sheet is sorted once.
+ */
 function appendSorted_(sh, rows) {
-  const start = Math.max(sh.getLastRow(), 1) + 1;
-  sh.getRange(start, 1, rows.length, TXN_HEADERS.length).setValues(rows);
+  if (!rows.length) return;
+  const W = TXN_HEADERS.length;
+  rows.sort((a, b) => b[C.DT - 1] - a[C.DT - 1]);
   const last = sh.getLastRow();
-  if (last > 2) sh.getRange(2, 1, last - 1, TXN_HEADERS.length).sort({ column: C.DT, ascending: false });
+  if (last < 2) {
+    ensureRows_(sh, 1 + rows.length);
+    sh.getRange(2, 1, rows.length, W).setValues(rows);
+    return;
+  }
+  const top = sh.getRange(2, 1, 1, W).getValues()[0];
+  const topDt = top[C.DT - 1] instanceof Date ? top[C.DT - 1].getTime() : NaN;
+  if (!isNaN(topDt) && rows[rows.length - 1][C.DT - 1].getTime() >= topDt) {
+    // Insert inside the data block (after row 2) so formats, banding and colour rules extend automatically,
+    // then write [new rows…, old top row] starting at row 2.
+    sh.insertRowsAfter(2, rows.length);
+    sh.getRange(2, 1, rows.length + 1, W).setValues(rows.concat([top]));
+    return;
+  }
+  ensureRows_(sh, last + rows.length);
+  sh.getRange(last + 1, 1, rows.length, W).setValues(rows);
+  sh.getRange(2, 1, last + rows.length - 1, W).sort({ column: C.DT, ascending: false });
+}
+
+/** A new sheet only has 1000 grid rows; writing past that fails. Grow it from inside so formatting carries over. */
+function ensureRows_(sh, needLastRow) {
+  const max = sh.getMaxRows();
+  if (needLastRow <= max) return;
+  const extra = needLastRow - max + 1000;
+  if (max > 2) sh.insertRowsBefore(max, extra); else sh.insertRowsAfter(max, extra);
 }
 
 function readIds_(sh) {
@@ -204,17 +245,34 @@ function readIds_(sh) {
   return sh.getRange(2, C.ID, last - 1, 1).getValues().map(r => String(r[0]));
 }
 
-function updateBalances_(ss, latest) {
+/**
+ * Maintains each account's running balance in the Accounts tab.
+ * A balance printed in the SMS always wins. When an SMS has no balance, the last known balance is
+ * moved by the credit/debit amount, so the total stays current; the next SMS with a balance re-anchors it.
+ */
+function updateBalances_(ss, moves) {
   const sh = ss.getSheetByName(TAB.ACCOUNTS);
   const last = sh.getLastRow();
   if (last < 2) return;
-  const data = sh.getRange(2, 1, last - 1, ACC_HEADERS.length).getValues();
-  data.forEach((r, i) => {
-    const l = latest[String(r[A.NICK - 1])];
-    if (!l) return;
-    const prevAt = r[A.BAL_AT - 1] instanceof Date ? r[A.BAL_AT - 1] : null;
-    if (!prevAt || l.dt >= prevAt) sh.getRange(i + 2, A.BAL, 1, 2).setValues([[l.bal, l.dt]]);
+  const rng = sh.getRange(2, A.BAL, last - 1, 2);
+  const vals = rng.getValues();
+  const nicks = sh.getRange(2, A.NICK, last - 1, 1).getValues();
+  let changed = false;
+  nicks.forEach((n, i) => {
+    const list = moves[String(n[0]).trim()];
+    if (!list) return;
+    let bal = vals[i][0] === '' || vals[i][0] === null ? null : Number(vals[i][0]);
+    let at = vals[i][1] instanceof Date ? vals[i][1] : null;
+    list.slice().sort((a, b) => a.dt - b.dt).forEach(m => {
+      if (at && m.dt < at) return; // older than what we already know
+      if (m.bal !== '') { bal = m.bal; at = m.dt; }
+      else if (bal !== null && !isNaN(bal) && at) { bal = round2_(bal + m.delta); at = m.dt; }
+    });
+    if (bal !== null && at && (bal !== vals[i][0] || !(vals[i][1] instanceof Date) || at.getTime() !== vals[i][1].getTime())) {
+      vals[i] = [bal, at]; changed = true;
+    }
   });
+  if (changed) rng.setValues(vals);
 }
 
 function touchDevice_(ss, device, added) {
@@ -267,43 +325,221 @@ function addAccount_(ss, acc) {
     sh.appendRow([nick, String(acc.bank || ''), "'" + num, /personal/i.test(acc.owner) ? 'Personal' : 'Company', aliases, false, '', '', 'Added from app']);
     ensureTxnSheet_(ss, sheetNameFor_(nick));
     rebuildReports();
+    bumpRev_();
     return { added: nick };
   } finally { lock.releaseLock(); }
 }
 
-// ============================================================ SUMMARY (for the app dashboard)
+// ============================================================ FAST READS FOR THE APP
+//
+// The app never scans the whole sheet:
+//  • totals come from a small per-account, per-month index kept in Script Properties and updated on every push
+//  • history pages read only the 25 rows they need (tabs are newest-first)
+//  • replies are cached; REV changes on every write and on hand edits, so the cache never serves stale data
+
+function home_(ss) {
+  const out = summary_(ss);
+  out.recent = history_(ss, {});
+  return out;
+}
 
 function summary_(ss) {
-  const accounts = readAccounts_(ss).filter(a => a.active);
   const master = ensureTxnSheet_(ss, TAB.MASTER);
-  const last = master.getLastRow();
-  const data = last > 1 ? master.getRange(2, 1, last - 1, C.DR).getValues() : [];
-  const now = new Date();
-  const mStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const yStart = new Date(now.getFullYear(), 0, 1);
-  const blank = () => ({ credit: 0, debit: 0, count: 0 });
-  const stats = {};
-  accounts.forEach(a => stats[a.nickname] = { month: blank(), year: blank(), all: blank() });
-
-  data.forEach(r => {
-    const s = stats[String(r[C.ACC - 1])];
-    if (!s) return;
-    const dt = r[C.DT - 1] instanceof Date ? r[C.DT - 1] : new Date(r[C.DT - 1]);
-    const cr = Number(r[C.CR - 1]) || 0, dr = Number(r[C.DR - 1]) || 0;
-    const add = b => { b.credit += cr; b.debit += dr; b.count++; };
-    add(s.all);
-    if (dt >= yStart) add(s.year);
-    if (dt >= mStart) add(s.month);
+  const rows = Math.max(master.getLastRow() - 1, 0);
+  const mKey = Utilities.formatDate(new Date(), TZ(), 'yyyy-MM');
+  const props = PropertiesService.getScriptProperties().getProperties();
+  return cached_('sum:' + (props.REV || '0') + ':' + rows + ':' + mKey, () => {
+    const stats = loadStats_(master, rows, props);
+    const yKey = mKey.slice(0, 4);
+    const accounts = readAccounts_(ss).filter(a => a.active);
+    const totals = { balance: 0, company: 0, personal: 0 };
+    const list = accounts.map(a => {
+      const m = blank_(), y = blank_(), all = blank_();
+      const months = stats[a.nickname] || {};
+      Object.keys(months).forEach(k => {
+        const v = months[k];
+        addTo_(all, v);
+        if (k.slice(0, 4) === yKey) addTo_(y, v);
+        if (k === mKey) addTo_(m, v);
+      });
+      if (a.balance !== null && !isNaN(a.balance)) {
+        totals.balance += a.balance;
+        totals[a.owner === 'Personal' ? 'personal' : 'company'] += a.balance;
+      }
+      return {
+        nickname: a.nickname, bank: a.bank, owner: a.owner, masked: '••' + a.number.slice(-4),
+        balance: a.balance, balanceAsOf: a.balanceAsOf,
+        month: round_(m), year: round_(y), all: round_(all),
+      };
+    });
+    Object.keys(totals).forEach(k => totals[k] = round2_(totals[k]));
+    return { accounts: list, totals: totals, txnCount: rows };
   });
+}
 
+/**
+ * One page of transactions, newest first.
+ * params: account (nickname, optional), type (CREDIT|DEBIT, optional), q (search, optional),
+ *         offset (row offset, default 0), limit (default 25, max 100)
+ * returns: items, nextOffset (pass back for the next page), hasMore, total (rows in that tab)
+ */
+function history_(ss, p) {
+  p = p || {};
+  const nick = String(p.account || '').trim();
+  const type = /^(CREDIT|DEBIT)$/i.test(String(p.type || '')) ? String(p.type).toUpperCase() : '';
+  const q = String(p.q || '').trim().toLowerCase().slice(0, 60);
+  const limit = Math.min(Math.max(parseInt(p.limit, 10) || PAGE, 1), 100);
+  const offset = Math.max(parseInt(p.offset, 10) || 0, 0);
+
+  const sh = ss.getSheetByName(nick ? sheetNameFor_(nick) : TAB.MASTER);
+  if (!sh) return { items: [], nextOffset: offset, hasMore: false, total: 0 };
+  const total = Math.max(sh.getLastRow() - 1, 0);
+  const rev = PropertiesService.getScriptProperties().getProperty('REV') || '0';
+  const run = () => scanPage_(sh, total, type, q, offset, limit);
+  return q ? run() : cached_(['h', rev, sh.getSheetId(), total, type, offset, limit].join(':'), run);
+}
+
+function scanPage_(sh, total, type, q, offset, limit) {
+  const W = C.SMS; // everything up to and including the original SMS
+  const filtered = !!(type || q);
+  const CHUNK = filtered ? 500 : limit;
+  const MAX_SCAN = 5000; // keeps one request well under a few seconds even on huge sheets
+  const items = [];
+  let pos = offset, scanned = 0;
+  while (pos < total && items.length < limit && scanned < MAX_SCAN) {
+    const data = sh.getRange(pos + 2, 1, Math.min(CHUNK, total - pos), W).getValues();
+    let i = 0;
+    for (; i < data.length && items.length < limit; i++) {
+      const r = data[i];
+      if (!String(r[C.ID - 1]).trim()) continue;
+      if (type && String(r[C.TYPE - 1]).toUpperCase() !== type) continue;
+      if (q && !rowMatches_(r, q)) continue;
+      items.push(rowToItem_(r));
+    }
+    pos += i; scanned += i;
+  }
+  return { items: items, nextOffset: pos, hasMore: pos < total, total: total };
+}
+
+function rowMatches_(r, q) {
+  return [C.ACC, C.BANK, C.MODE, C.PARTY, C.REF, C.DEVICE, C.SMS, C.CR, C.DR]
+    .some(c => String(r[c - 1]).toLowerCase().indexOf(q) !== -1);
+}
+
+function rowToItem_(r) {
+  const d = r[C.DT - 1] instanceof Date ? r[C.DT - 1] : new Date(r[C.DT - 1]);
+  const credit = String(r[C.TYPE - 1]).toUpperCase() === 'CREDIT';
+  const bal = r[C.BAL - 1];
   return {
-    accounts: accounts.map(a => ({
-      nickname: a.nickname, bank: a.bank, owner: a.owner, masked: '••' + a.number.slice(-4),
-      balance: a.balance, balanceAsOf: a.balanceAsOf,
-      month: round_(stats[a.nickname].month), year: round_(stats[a.nickname].year), all: round_(stats[a.nickname].all),
-    })),
+    id: String(r[C.ID - 1]), ts: d.getTime() || 0,
+    account: String(r[C.ACC - 1]), bank: String(r[C.BANK - 1]), masked: String(r[C.NO - 1]), owner: String(r[C.OWNER - 1]),
+    type: credit ? 'CREDIT' : 'DEBIT', amount: round2_(Number(credit ? r[C.CR - 1] : r[C.DR - 1]) || 0),
+    balance: bal === '' || bal === null || isNaN(Number(bal)) ? null : Number(bal),
+    mode: String(r[C.MODE - 1]), party: String(r[C.PARTY - 1]), ref: String(r[C.REF - 1]),
+    sender: String(r[C.SENDER - 1]), device: String(r[C.DEVICE - 1]), sms: String(r[C.SMS - 1]),
   };
 }
+
+// ------------------------------------------------------------ totals index (Script Properties)
+// ST:<account> = {"2026-11":[credit, debit, count], …}   ST_N = rows indexed   ST_DIRTY = '1' → rebuild
+
+function loadStats_(master, rows, props) {
+  if (props.ST_DIRTY !== '1' && props.ST_N !== undefined && Number(props.ST_N) === rows) {
+    const out = {};
+    Object.keys(props).forEach(k => { if (k.indexOf('ST:') === 0) out[k.slice(3)] = JSON.parse(props[k]); });
+    return out;
+  }
+  const lock = LockService.getScriptLock();
+  const locked = lock.tryLock(20000);
+  try { return rebuildStats_(master, locked); }
+  finally { if (locked) lock.releaseLock(); }
+}
+
+function rebuildStats_(master, save) {
+  const last = master.getLastRow();
+  // columns B (date) … K (debit)
+  const data = last > 1 ? master.getRange(2, C.DT, last - 1, C.DR - C.DT + 1).getValues() : [];
+  const st = {};
+  let n = 0;
+  data.forEach(r => {
+    if (!String(r[C.ACC - C.DT]).trim()) return;
+    n++;
+    let month = String(r[C.MONTH - C.DT] || '');
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      const d = r[0] instanceof Date ? r[0] : new Date(r[0]);
+      if (isNaN(d)) return;
+      month = Utilities.formatDate(d, TZ(), 'yyyy-MM');
+    }
+    statAdd_(st, String(r[C.ACC - C.DT]).trim(), month, r[C.CR - C.DT], r[C.DR - C.DT]);
+  });
+  if (save) {
+    const props = PropertiesService.getScriptProperties();
+    const obj = { ST_N: String(data.length), ST_DIRTY: '0' };
+    Object.keys(st).forEach(k => obj['ST:' + k] = JSON.stringify(st[k]));
+    Object.keys(props.getProperties()).forEach(k => { if (k.indexOf('ST:') === 0 && !(k in obj)) props.deleteProperty(k); });
+    props.setProperties(obj);
+  }
+  return st;
+}
+
+/** Called inside the push lock: adds the new rows to the index, or flags a rebuild if the index is out of step. */
+function addToStats_(rows, rowsBefore) {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  if (all.ST_DIRTY === '1' || all.ST_N === undefined || Number(all.ST_N) !== rowsBefore) {
+    props.setProperty('ST_DIRTY', '1');
+    return;
+  }
+  const st = {};
+  rows.forEach(r => {
+    const nick = String(r[C.ACC - 1]);
+    if (!st[nick]) st[nick] = all['ST:' + nick] ? JSON.parse(all['ST:' + nick]) : {};
+    statAdd_(st, nick, r[C.MONTH - 1], r[C.CR - 1], r[C.DR - 1]);
+  });
+  const obj = { ST_N: String(rowsBefore + rows.length) };
+  Object.keys(st).forEach(k => obj['ST:' + k] = JSON.stringify(st[k]));
+  props.setProperties(obj);
+}
+
+function statAdd_(st, nick, month, cr, dr) {
+  const m = st[nick] = st[nick] || {};
+  const v = m[month] = m[month] || [0, 0, 0];
+  v[0] = round2_(v[0] + (Number(cr) || 0));
+  v[1] = round2_(v[1] + (Number(dr) || 0));
+  v[2]++;
+}
+
+/** Menu: rebuilds the app's totals from the Master tab (use after editing or deleting rows by hand). */
+function recalcTotals() {
+  const ss = SpreadsheetApp.getActive();
+  rebuildStats_(ensureTxnSheet_(ss, TAB.MASTER), true);
+  bumpRev_();
+  try { SpreadsheetApp.getActive().toast('App totals recalculated', 'LedgerSync'); } catch (e) {}
+}
+
+/** Any hand edit in the sheet: refresh the app's cached replies, and re-index totals if Master changed. */
+function onEdit(e) {
+  try {
+    const name = e && e.range ? e.range.getSheet().getName() : '';
+    if (name === TAB.DASH || name === TAB.MONTHLY || name === TAB.DEVICES) return;
+    const obj = { REV: String(Date.now()) };
+    if (name === TAB.MASTER) obj.ST_DIRTY = '1';
+    PropertiesService.getScriptProperties().setProperties(obj);
+  } catch (err) { /* never block an edit */ }
+}
+
+function bumpRev_() { PropertiesService.getScriptProperties().setProperty('REV', String(Date.now())); }
+
+function cached_(key, fn) {
+  let cache = null;
+  try { cache = CacheService.getScriptCache(); const hit = cache.get(key); if (hit) return JSON.parse(hit); } catch (e) {}
+  const out = fn();
+  try { const s = JSON.stringify(out); if (cache && s.length < 95000) cache.put(key, s, CACHE_TTL); } catch (e) {}
+  return out;
+}
+
+function blank_() { return { credit: 0, debit: 0, count: 0 }; }
+function addTo_(b, v) { b.credit += Number(v[0]) || 0; b.debit += Number(v[1]) || 0; b.count += Number(v[2]) || 0; }
 
 function round_(b) { return { credit: round2_(b.credit), debit: round2_(b.debit), count: b.count }; }
 function round2_(n) { return Math.round(n * 100) / 100; }
@@ -387,6 +623,7 @@ function rebuildReports() {
   buildDashboard_(ss);
   buildMonthly_(ss);
   orderTabs_(ss);
+  bumpRev_();
 }
 
 function buildDashboard_(ss) {
@@ -498,6 +735,7 @@ function resortAll() {
     const last = sh.getLastRow();
     if (last > 2) sh.getRange(2, 1, last - 1, TXN_HEADERS.length).sort({ column: C.DT, ascending: false });
   });
+  bumpRev_();
 }
 
 function orderTabs_(ss) {

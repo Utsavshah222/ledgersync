@@ -15,6 +15,9 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.ledgersync.app.Notifications
 import com.ledgersync.app.data.AppDatabase
+import com.ledgersync.app.data.HistoryCache
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.ledgersync.app.data.Settings
 import com.ledgersync.app.data.SyncState
 import com.ledgersync.app.sms.Ingest
@@ -29,7 +32,10 @@ import java.util.concurrent.TimeUnit
  */
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
-    override suspend fun doWork(): Result {
+    // One sync at a time: the "sync now" and the 15-minute jobs must never upload the same batch twice.
+    override suspend fun doWork(): Result = runLock.withLock { sync() }
+
+    private suspend fun sync(): Result {
         val ctx = applicationContext
         val settings = Settings.get(ctx)
         if (!settings.isConnected) return Result.success()
@@ -52,11 +58,13 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
 
         var failed = false
+        var uploaded = false
         while (true) {
             val batch = dao.pending(BATCH)
             if (batch.isEmpty()) break
             try {
                 val results = api.push(settings.deviceName, batch)
+                uploaded = true
                 val now = System.currentTimeMillis()
                 val added = batch.filter { results[it.txnKey] == "added" }.map { it.txnKey }
                 val dup = batch.filter { results[it.txnKey] == "duplicate" }.map { it.txnKey }
@@ -72,7 +80,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }
         }
 
-        runCatching { settings.summaryJson = api.fetchSummary() }
+        // Balances + newest history from every phone. Skipped when nothing changed and it was fetched moments ago
+        // (several queued "sync now" runs back-to-back after the phone comes back online).
+        val now = System.currentTimeMillis()
+        if (force || uploaded || now - lastHomeFetch > TimeUnit.SECONDS.toMillis(30)) {
+            runCatching { refreshHome(ctx, api) }.onSuccess { lastHomeFetch = now }
+        }
 
         return if (failed) {
             if (runAttemptCount >= 3) Notifications.showSyncProblem(ctx, settings.lastSyncError ?: "Upload failed")
@@ -87,7 +100,16 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
     companion object {
         const val KEY_FORCE_CONFIG = "forceConfig"
-        private const val BATCH = 40
+        private const val BATCH = 100
+        private val runLock = Mutex()
+        @Volatile private var lastHomeFetch = 0L
+
+        /** Saves the sheet's balances/totals and its first history page (all phones) for instant, offline-ready screens. */
+        suspend fun refreshHome(ctx: Context, api: SheetApi) {
+            val (summary, recent) = api.fetchHome()
+            recent?.let { HistoryCache.write(ctx, HistoryCache.DEFAULT, it) }
+            Settings.get(ctx).summaryJson = summary
+        }
     }
 }
 

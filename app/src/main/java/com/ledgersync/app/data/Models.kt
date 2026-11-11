@@ -76,6 +76,48 @@ data class AccountSummary(
 
 enum class Period(val label: String) { MONTH("This Month"), YEAR("This Year"), ALL("All Time") }
 
+/** A transaction read back from the Google Sheet (captured by any of the connected phones). */
+data class SheetTxn(val txn: TxnEntity, val device: String) {
+    companion object {
+        fun fromJson(o: JSONObject) = SheetTxn(
+            txn = TxnEntity(
+                txnKey = o.optString("id"),
+                timestamp = o.optLong("ts"),
+                accountNick = o.optString("account"),
+                bank = o.optString("bank"),
+                accountMasked = o.optString("masked"),
+                owner = o.optString("owner", "Company"),
+                type = if (o.optString("type").equals("CREDIT", true)) "CREDIT" else "DEBIT",
+                amount = o.optDouble("amount", 0.0),
+                balance = if (o.isNull("balance") || o.optString("balance").isBlank()) null else o.optDouble("balance"),
+                mode = o.optString("mode"),
+                party = o.optString("party"),
+                reference = o.optString("ref"),
+                sender = o.optString("sender"),
+                body = o.optString("sms"),
+                syncState = SyncState.SYNCED,
+            ),
+            device = o.optString("device"),
+        )
+    }
+}
+
+/** One page (25 rows by default) of sheet history. Pass [nextOffset] back to get the following page. */
+data class HistoryPage(val items: List<SheetTxn>, val nextOffset: Int, val hasMore: Boolean, val total: Int) {
+    companion object {
+        fun parse(json: String?): HistoryPage? = try {
+            val o = JSONObject(json ?: return null)
+            val arr = o.optJSONArray("items") ?: JSONArray()
+            HistoryPage(
+                items = (0 until arr.length()).map { SheetTxn.fromJson(arr.getJSONObject(it)) }.filter { it.txn.txnKey.isNotBlank() },
+                nextOffset = o.optInt("nextOffset", arr.length()),
+                hasMore = o.optBoolean("hasMore", false),
+                total = o.optInt("total", arr.length()),
+            )
+        } catch (_: Exception) { null }
+    }
+}
+
 data class Summary(val accounts: List<AccountSummary>, val fetchedAt: Long) {
     companion object {
         fun parse(json: String?): Summary? = try {
