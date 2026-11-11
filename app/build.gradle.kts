@@ -30,7 +30,7 @@ android {
         // Pre-filled on every phone so only the secret key has to be entered.
         buildConfigField(
             "String", "DEFAULT_SCRIPT_URL",
-            "\"https://script.google.com/macros/s/AKfycbycALS2aqb8trvSf3PGv_NsYBagb7F0D8z3C9jo2wmZt_gtI87UyXSoEVpfm_RZ9DWv/exec\"",
+            "\"https://script.google.com/macros/s/AKfycbzVXIBmhyPsPvDZHnAMIUaIuLS7S5mnGqH9AouqSorKAseR4lDKsZPfYjZkkDXs1Kzm/exec\"",
         )
     }
 

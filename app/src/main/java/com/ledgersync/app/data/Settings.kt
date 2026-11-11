@@ -19,7 +19,8 @@ class Settings private constructor(context: Context) {
     init { sp.registerOnSharedPreferenceChangeListener(listener) }
 
     var scriptUrl: String
-        get() = sp.getString("scriptUrl", null)?.takeIf { it.isNotBlank() } ?: com.ledgersync.app.BuildConfig.DEFAULT_SCRIPT_URL
+        // Phones still pointing at an older built-in deployment move to the current one automatically.
+        get() = sp.getString("scriptUrl", null)?.takeIf { it.isNotBlank() && it !in RETIRED_URLS } ?: com.ledgersync.app.BuildConfig.DEFAULT_SCRIPT_URL
         set(v) = sp.edit().putString("scriptUrl", v.trim()).apply()
 
     var secretKey: String
@@ -72,6 +73,9 @@ class Settings private constructor(context: Context) {
     val isConnected get() = scriptUrl.startsWith("https://") && secretKey.isNotBlank()
 
     companion object {
+        private val RETIRED_URLS = setOf(
+            "https://script.google.com/macros/s/AKfycbycALS2aqb8trvSf3PGv_NsYBagb7F0D8z3C9jo2wmZt_gtI87UyXSoEVpfm_RZ9DWv/exec",
+        )
         @Volatile private var instance: Settings? = null
         fun get(context: Context): Settings = instance ?: synchronized(this) {
             instance ?: Settings(context.applicationContext).also { instance = it }
