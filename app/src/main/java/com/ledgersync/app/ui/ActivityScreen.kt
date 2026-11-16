@@ -74,7 +74,8 @@ private data class Entry(val txn: TxnEntity, val device: String?)
 fun ActivityScreen(vm: MainViewModel) {
     val source by vm.historySource.collectAsState()
     val filter by vm.historyFilter.collectAsState()
-    val accounts by vm.accounts.collectAsState()
+    val dash by vm.dashboard.collectAsState()
+    val accountNames = dash?.summary?.accounts.orEmpty().map { it.nickname }
     val feed by vm.feed.collectAsState()
     val queued by vm.queued.collectAsState()
     val localItems by vm.localItems.collectAsState()
@@ -143,13 +144,13 @@ fun ActivityScreen(vm: MainViewModel) {
                 }
             }
         }
-        if (accounts.size > 1) {
+        if (accountNames.size > 1) {
             Spacer(Modifier.height(8.dp))
             LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 item { FilterChipPill("All accounts", filter.account == null) { vm.setFilter(filter.copy(account = null)) } }
-                items(accounts, key = { it.nickname }) { a ->
-                    FilterChipPill(a.nickname, filter.account == a.nickname) {
-                        vm.setFilter(filter.copy(account = if (filter.account == a.nickname) null else a.nickname))
+                items(accountNames, key = { it }) { name ->
+                    FilterChipPill(name, filter.account == name) {
+                        vm.setFilter(filter.copy(account = if (filter.account == name) null else name))
                     }
                 }
             }
@@ -270,7 +271,7 @@ fun TxnDetailSheet(t: TxnEntity, device: String? = null, onDismiss: () -> Unit) 
             Spacer(Modifier.height(18.dp))
             GlassCard(Modifier.fillMaxWidth(), padding = 14.dp) {
                 KeyValue("Account", "${t.accountNick} · ${t.bank} ${t.accountMasked}")
-                KeyValue("Owner", t.owner)
+                if (t.owner.isNotBlank()) KeyValue("Owner", t.owner)
                 KeyValue("Type", if (t.isCredit) "Credit" else "Debit", if (t.isCredit) LS.Credit else LS.Debit)
                 KeyValue("Mode", t.mode)
                 KeyValue("Balance after", t.balance?.let { formatInr(it) } ?: "")

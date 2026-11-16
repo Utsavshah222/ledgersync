@@ -60,7 +60,11 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
             transitionSpec = { (fadeIn(tween(500)) + scaleIn(initialScale = 0.96f)) togetherWith fadeOut(tween(250)) },
             label = "root",
         ) { onboarded ->
-            if (onboarded) MainShell(vm) else OnboardingScreen(vm)
+            when {
+                !onboarded -> OnboardingScreen(vm)
+                com.ledgersync.app.BuildConfig.IS_ADMIN -> MainShell(vm) // full dashboard (Admin edition)
+                else -> StaffScreen(vm)                                   // setup + status only (Staff edition)
+            }
         }
     }
 }

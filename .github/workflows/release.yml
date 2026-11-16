@@ -50,9 +50,9 @@ jobs:
           echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest --no-daemon
+        run: ./gradlew testAdminDebugUnitTest --no-daemon
 
-      - name: Build signed APK
+      - name: Build signed APKs (Admin + Staff)
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -63,7 +63,8 @@ jobs:
             -PversionCode=${{ github.run_number }} \
             -PgithubRepo=${{ github.repository }}
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/LedgerSync-v${{ steps.ver.outputs.name }}.apk"
+          cp app/build/outputs/apk/admin/release/app-admin-release.apk "dist/LedgerSync-Admin-v${{ steps.ver.outputs.name }}.apk"
+          cp app/build/outputs/apk/staff/release/app-staff-release.apk "dist/LedgerSync-Staff-v${{ steps.ver.outputs.name }}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -77,5 +78,9 @@ jobs:
           files: dist/*.apk
           generate_release_notes: true
           body: |
-            **Install:** download the APK below on the phone → open it → allow "Install unknown apps" if asked.
+            Two editions — install whichever a phone needs (they can both be installed on one phone):
+            - **LedgerSync-Admin** — full dashboard: all balances, history and the filter view. For the owner / accounts manager.
+            - **LedgerSync-Staff** — setup + a tiny status screen only. Captures and sends bank SMS, shows no money data. For staff phones.
+
+            **Install:** download the APK on the phone → open it → allow "Install unknown apps" if asked.
             Already installed? Just install this over it — your data and connection are kept.

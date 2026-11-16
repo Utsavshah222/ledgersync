@@ -146,8 +146,8 @@ private fun WelcomeStep(onNext: () -> Unit) {
         )
         Spacer(Modifier.height(30.dp))
         Feature(Icons.Rounded.Bolt, "Instant & always on", "Captures in the background, even when the app is closed.")
-        Feature(Icons.Rounded.AccountBalance, "Only your accounts", "Tracks just the company & personal accounts you choose.")
-        Feature(Icons.Rounded.TableChart, "Perfect sheet", "Master sheet, one tab per account, live monthly & yearly totals.")
+        Feature(Icons.Rounded.AccountBalance, "Every bank account", "No setup — every bank's debit & credit SMS is captured automatically.")
+        Feature(Icons.Rounded.TableChart, "Perfect sheet", "Master sheet, a filter-&-export view, live monthly & yearly totals.")
         Feature(Icons.Rounded.Verified, "Zero duplicates", "Install on many phones — each transaction is stored exactly once.")
         Spacer(Modifier.height(28.dp))
         PrimaryButton("Get started", onNext, icon = Icons.Rounded.ArrowForward)
@@ -190,7 +190,7 @@ private fun PermissionStep(onNext: () -> Unit) {
         Spacer(Modifier.height(16.dp))
         Text("A few permissions", style = MaterialTheme.typography.headlineMedium, color = LS.Text)
         Spacer(Modifier.height(6.dp))
-        Text("LedgerSync reads only bank transaction messages for your tracked accounts. Personal chats are never read or uploaded.", color = LS.Muted, style = MaterialTheme.typography.bodyMedium)
+        Text("LedgerSync reads only bank transaction messages. Personal chats, OTPs and promotions are never read or uploaded.", color = LS.Muted, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(24.dp))
         PermCard(Icons.Rounded.Sms, "SMS access", "Required — to receive and read bank messages", sms, required = true) {
             smsLauncher.launch(arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS))
@@ -286,53 +286,41 @@ private fun ConnectStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Uni
 
 @Composable
 private fun ImportStep(vm: MainViewModel) {
-    val accounts by vm.accounts.collectAsState()
     val imp by vm.importState.collectAsState()
     var choice by remember { mutableIntStateOf(0) }
     val running = imp?.running == true
     val done = imp != null && !running
+    val finishLabel = if (com.ledgersync.app.BuildConfig.IS_ADMIN) "Open dashboard" else "Finish setup"
 
     StepScaffold {
         Spacer(Modifier.height(16.dp))
         Text("You're connected 🎉", style = MaterialTheme.typography.headlineMedium, color = LS.Text)
         Spacer(Modifier.height(6.dp))
         Text(
-            if (accounts.isEmpty()) "No accounts in the sheet yet — add them from the Accounts tab after setup."
-            else "Tracking ${accounts.size} account${if (accounts.size == 1) "" else "s"}:",
+            "From now on, every bank debit & credit SMS on this phone is captured automatically and sent to your Google Sheet — no accounts to set up.",
             color = LS.Muted, style = MaterialTheme.typography.bodyMedium,
         )
-        Spacer(Modifier.height(12.dp))
-        accounts.take(8).forEach { a ->
-            Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                BankAvatar(a.bank.ifBlank { a.nickname }, 36.dp)
-                Spacer(Modifier.width(12.dp))
-                Text(a.nickname, color = LS.Text, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                Text(a.masked, color = LS.Muted, style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        if (accounts.isNotEmpty()) {
-            Spacer(Modifier.height(22.dp))
-            Text("Import older bank SMS?", color = LS.Text, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(10.dp))
-            ChoiceChips(listOf("Skip", "This month", "This year"), choice, { if (!running && !done) choice = it }, Modifier.fillMaxWidth())
-            imp?.let { st ->
-                Spacer(Modifier.height(14.dp))
-                if (st.running) {
-                    LinearProgressIndicator(
-                        progress = { if (st.total > 0) st.scanned / st.total.toFloat() else 0f },
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = LS.Primary, trackColor = LS.Surface3,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text("Reading ${st.scanned} of ${st.total} messages…", color = LS.Muted, style = MaterialTheme.typography.bodySmall)
-                } else {
-                    Text("Found ${st.matched} bank entries · ${st.added} queued for the sheet", color = LS.Credit, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                }
+        Spacer(Modifier.height(22.dp))
+        Text("Import older bank SMS?", color = LS.Text, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(10.dp))
+        ChoiceChips(listOf("Skip", "This month", "This year"), choice, { if (!running && !done) choice = it }, Modifier.fillMaxWidth())
+        imp?.let { st ->
+            Spacer(Modifier.height(14.dp))
+            if (st.running) {
+                LinearProgressIndicator(
+                    progress = { if (st.total > 0) st.scanned / st.total.toFloat() else 0f },
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = LS.Primary, trackColor = LS.Surface3,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text("Reading ${st.scanned} of ${st.total} messages…", color = LS.Muted, style = MaterialTheme.typography.bodySmall)
+            } else {
+                Text("Found ${st.matched} bank entries · ${st.added} queued for the sheet", color = LS.Credit, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
             }
         }
         Spacer(Modifier.height(28.dp))
         when {
             running -> PrimaryButton("Importing…", {}, loading = true)
-            done || choice == 0 || accounts.isEmpty() -> PrimaryButton("Open dashboard", { vm.finishOnboarding() }, icon = Icons.Rounded.ArrowForward)
+            done || choice == 0 -> PrimaryButton(finishLabel, { vm.finishOnboarding() }, icon = Icons.Rounded.ArrowForward)
             else -> PrimaryButton("Import & continue", {
                 vm.importHistory(if (choice == 1) MainViewModel.startOfMonth() else MainViewModel.startOfYear())
             }, icon = Icons.Rounded.ArrowForward)

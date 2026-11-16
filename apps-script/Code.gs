@@ -4,23 +4,27 @@
  * Paste this whole file into  Extensions ▸ Apps Script  of the company spreadsheet,
  * run  setup  once, then  Deploy ▸ New deployment ▸ Web app  (Execute as: Me, Access: Anyone).
  *
+ * The phones now capture EVERY bank debit/credit SMS automatically — there is no account list to maintain.
+ * The sheet groups transactions on its own, by  "<Bank> ••<last 4>",  so no per-account tabs are needed.
+ *
  * Tabs it maintains:
- *   Dashboard  – live balances + This Month / This Year / All-time credit, debit, net per account
+ *   Dashboard  – live balance + This Month / This Year / All-time credit, debit, net for every detected account
  *   Monthly    – month-by-month totals (overall and per account)
- *   Master     – every transaction from every account, newest first
- *   <Account>  – one tab per tracked account, same columns as Master
- *   Accounts   – the list of accounts to track (edit here or from the app)
+ *   Master     – every transaction from every phone, newest first
+ *   Filter     – pick account / bank / type / date range → matching rows + totals, and export to Excel or PDF
+ *   Accounts   – the accounts detected so far, with their latest balance (filled in automatically)
  *   Devices    – which phones are sending data and when they last synced
  */
 
-const TAB = { DASH: 'Dashboard', MONTHLY: 'Monthly', MASTER: 'Master', ACCOUNTS: 'Accounts', DEVICES: 'Devices' };
+const TAB = { DASH: 'Dashboard', MONTHLY: 'Monthly', MASTER: 'Master', FILTER: 'Filter', ACCOUNTS: 'Accounts', DEVICES: 'Devices' };
 
 const TXN_HEADERS = ['Txn ID', 'Date & Time', 'Month', 'Year', 'Account', 'Bank', 'A/c No.', 'Owner', 'Type',
   'Credit (₹)', 'Debit (₹)', 'Balance After (₹)', 'Mode', 'Party / Merchant', 'Reference', 'Sender', 'Device', 'Original SMS', 'Synced At'];
 const C = { ID: 1, DT: 2, MONTH: 3, YEAR: 4, ACC: 5, BANK: 6, NO: 7, OWNER: 8, TYPE: 9, CR: 10, DR: 11, BAL: 12, MODE: 13, PARTY: 14, REF: 15, SENDER: 16, DEVICE: 17, SMS: 18, SYNCED: 19 };
 
-const ACC_HEADERS = ['Nickname', 'Bank', 'Account Number', 'Owner (Company/Personal)', 'Linked Card Last-4 (comma sep.)', 'Paused (tick to stop tracking)', 'Last Balance (₹)', 'Balance As Of', 'Notes'];
-const A = { NICK: 1, BANK: 2, NUM: 3, OWNER: 4, ALIASES: 5, PAUSED: 6, BAL: 7, BAL_AT: 8 };
+// Accounts tab is now auto-discovered (read-only for the user); one row per account LedgerSync has seen.
+const ACC_HEADERS = ['Account', 'Bank', 'A/c No.', 'Last Balance (₹)', 'Balance As Of'];
+const A = { LABEL: 1, BANK: 2, NO: 3, BAL: 4, BAL_AT: 5 };
 
 const FMT = '"₹"#,##0.00';
 const FMT_NET = '"₹"#,##0.00;[Red]-"₹"#,##0.00';
@@ -28,19 +32,30 @@ const FMT_NET = '"₹"#,##0.00;[Red]-"₹"#,##0.00';
 let tz_ = null;
 const TZ = () => tz_ || (tz_ = Session.getScriptTimeZone() || 'Asia/Kolkata');
 
-const API_VERSION = 2;
+const API_VERSION = 3;
 const PAGE = 25;            // default page size for the app's history lists
 const CACHE_TTL = 600;      // seconds; every write bumps REV so cached replies never go stale
 const COLORS = { header: '#1E1B4B', headerText: '#FFFFFF', credit: '#0F9D58', debit: '#D93025', band: '#F5F3FF', accent: '#6D4BFF' };
+
+// Filter tab layout (used by the formulas and the export buttons)
+const F = {
+  ACC: 'B4', BANK: 'B5', TYPE: 'B6', FROM: 'B7', TO: 'B8',
+  XLS_ROW: 4, XLS_COL: 7, PDF_ROW: 6, PDF_COL: 7, // checkbox "buttons" at G4 / G6
+  RESULT_ROW: 11, RESULT_COLS: 12,
+  LIST_ACC: 16, LIST_BANK: 17, // hidden helper lists in columns P / Q
+};
 
 // ============================================================ MENU / SETUP
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('LedgerSync')
     .addItem('Connection details (for the app)', 'showConnection')
-    .addItem('Rebuild Dashboard & Monthly', 'rebuildReports')
+    .addItem('Rebuild Dashboard, Monthly & Filter', 'rebuildReports')
     .addItem('Re-sort all sheets (newest first)', 'resortAll')
     .addItem('Recalculate app totals (after hand edits)', 'recalcTotals')
+    .addSeparator()
+    .addItem('⬇ Export current filter to Excel', 'exportFilterToExcel')
+    .addItem('⬇ Export current filter to PDF', 'exportFilterToPdf')
     .addSeparator()
     .addItem('Run first-time setup', 'setup')
     .addItem('Generate NEW secret key (disconnects phones)', 'rotateSecret')
@@ -57,12 +72,21 @@ function setup() {
   ensureAccountsSheet_(ss);
   ensureDevicesSheet_(ss);
   rebuildReports();
+  ensureEditTrigger_();
   orderTabs_(ss);
   const first = ss.getSheetByName('Sheet1');
   if (first && first.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(first);
 
   Logger.log('Setup complete. Secret key: ' + props.getProperty('SECRET'));
   try { showConnection(); } catch (e) { /* run from editor: no UI */ }
+}
+
+/** The export buttons on the Filter tab need an installable onEdit trigger (it runs with full authorization). */
+function ensureEditTrigger_() {
+  try {
+    const have = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'onEditInstallable');
+    if (!have) ScriptApp.newTrigger('onEditInstallable').forSpreadsheet(SpreadsheetApp.getActive()).onEdit().create();
+  } catch (e) { /* non-fatal: the LedgerSync menu still exports */ }
 }
 
 function showConnection() {
@@ -140,19 +164,16 @@ function push_(ss, body) {
   const results = {};
   if (!txns.length) return { results: results };
 
+  let newAccounts = false;
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
     const master = ensureTxnSheet_(ss, TAB.MASTER);
     const before = Math.max(master.getLastRow() - 1, 0);
     const existing = new Set(readIds_(master));
-    const accounts = readAccounts_(ss);
-    const byNick = {};
-    accounts.forEach(a => byNick[a.nickname.toLowerCase()] = a);
 
     const now = new Date();
     const rows = [];
-    const perAccount = {};
     const moves = {};
 
     txns.forEach(t => {
@@ -161,8 +182,9 @@ function push_(ss, body) {
       if (existing.has(id)) { results[id] = 'duplicate'; return; }
       existing.add(id);
 
-      const acc = byNick[String(t.account || '').toLowerCase()];
-      const nick = acc ? acc.nickname : String(t.account || 'Unknown');
+      const bank = String(t.bank || '');
+      const masked = String(t.masked || '');
+      const nick = String(t.account || '').trim() || (bank + ' ' + masked).trim() || 'Unknown';
       const dt = new Date(Number(t.ts) || Date.now());
       const credit = t.type === 'CREDIT';
       const amount = round2_(Number(t.amount) || 0);
@@ -171,10 +193,7 @@ function push_(ss, body) {
         id, dt,
         Utilities.formatDate(dt, TZ(), 'yyyy-MM'),
         Number(Utilities.formatDate(dt, TZ(), 'yyyy')),
-        nick,
-        acc ? acc.bank : String(t.bank || ''),
-        acc ? maskNo_(acc.number) : String(t.masked || ''),
-        acc ? acc.owner : String(t.owner || 'Company'),
+        nick, bank, masked, String(t.owner || ''),
         credit ? 'CREDIT' : 'DEBIT',
         credit ? amount : '',
         credit ? '' : amount,
@@ -183,23 +202,25 @@ function push_(ss, body) {
         String(t.sender || ''), device, String(t.sms || '').slice(0, 1000), now,
       ];
       rows.push(row);
-      (perAccount[nick] = perAccount[nick] || []).push(row);
       (moves[nick] = moves[nick] || []).push({ dt: dt, delta: credit ? amount : -amount, bal: bal });
       results[id] = 'added';
     });
 
     if (rows.length) {
       appendSorted_(master, rows);
-      Object.keys(perAccount).forEach(nick => appendSorted_(ensureTxnSheet_(ss, sheetNameFor_(nick)), perAccount[nick]));
+      newAccounts = ensureAccountRows_(ss, rows);
       updateBalances_(ss, moves);
       addToStats_(rows, before);
       bumpRev_();
     }
     touchDevice_(ss, device, rows.length);
-    return { results: results, added: rows.length };
   } finally {
     lock.releaseLock();
   }
+
+  // A brand-new account showed up — refresh the Dashboard and the Filter dropdowns to include it.
+  if (newAccounts) { try { rebuildReports(); } catch (e) {} }
+  return { results: results, added: Object.keys(results).filter(k => results[k] === 'added').length };
 }
 
 /**
@@ -220,8 +241,6 @@ function appendSorted_(sh, rows) {
   const top = sh.getRange(2, 1, 1, W).getValues()[0];
   const topDt = top[C.DT - 1] instanceof Date ? top[C.DT - 1].getTime() : NaN;
   if (!isNaN(topDt) && rows[rows.length - 1][C.DT - 1].getTime() >= topDt) {
-    // Insert inside the data block (after row 2) so formats, banding and colour rules extend automatically,
-    // then write [new rows…, old top row] starting at row 2.
     sh.insertRowsAfter(2, rows.length);
     sh.getRange(2, 1, rows.length + 1, W).setValues(rows.concat([top]));
     return;
@@ -245,6 +264,27 @@ function readIds_(sh) {
   return sh.getRange(2, C.ID, last - 1, 1).getValues().map(r => String(r[0]));
 }
 
+/** Makes sure the Accounts tab has a row for every account label in [rows]. Returns true if any were added. */
+function ensureAccountRows_(ss, rows) {
+  const sh = ensureAccountsSheet_(ss);
+  const last = sh.getLastRow();
+  const have = last > 1 ? sh.getRange(2, A.LABEL, last - 1, 1).getValues().map(r => String(r[0]).trim()) : [];
+  const haveSet = {}; have.forEach(h => haveSet[h] = true);
+  const seen = {};
+  const toAdd = [];
+  rows.forEach(r => {
+    const label = String(r[C.ACC - 1]).trim();
+    if (!label || haveSet[label] || seen[label]) return;
+    seen[label] = true;
+    toAdd.push([label, String(r[C.BANK - 1]), String(r[C.NO - 1]), '', '']);
+  });
+  if (toAdd.length) {
+    const start = Math.max(sh.getLastRow(), 1) + 1;
+    sh.getRange(start, 1, toAdd.length, ACC_HEADERS.length).setValues(toAdd);
+  }
+  return toAdd.length > 0;
+}
+
 /**
  * Maintains each account's running balance in the Accounts tab.
  * A balance printed in the SMS always wins. When an SMS has no balance, the last known balance is
@@ -256,7 +296,7 @@ function updateBalances_(ss, moves) {
   if (last < 2) return;
   const rng = sh.getRange(2, A.BAL, last - 1, 2);
   const vals = rng.getValues();
-  const nicks = sh.getRange(2, A.NICK, last - 1, 1).getValues();
+  const nicks = sh.getRange(2, A.LABEL, last - 1, 1).getValues();
   let changed = false;
   nicks.forEach((n, i) => {
     const list = moves[String(n[0]).trim()];
@@ -289,21 +329,21 @@ function touchDevice_(ss, device, added) {
   }
 }
 
-// ============================================================ ACCOUNTS
+// ============================================================ ACCOUNTS (auto-discovered)
 
 function readAccounts_(ss) {
   const sh = ensureAccountsSheet_(ss);
   const last = sh.getLastRow();
   if (last < 2) return [];
   return sh.getRange(2, 1, last - 1, ACC_HEADERS.length).getValues()
-    .filter(r => String(r[A.NICK - 1]).trim() && String(r[A.NUM - 1]).trim())
+    .filter(r => String(r[A.LABEL - 1]).trim())
     .map(r => ({
-      nickname: String(r[A.NICK - 1]).trim(),
+      nickname: String(r[A.LABEL - 1]).trim(),
       bank: String(r[A.BANK - 1]).trim(),
-      number: String(r[A.NUM - 1]).replace(/[^0-9]/g, ''),
-      owner: /personal/i.test(String(r[A.OWNER - 1])) ? 'Personal' : 'Company',
-      aliases: String(r[A.ALIASES - 1]).split(/[,\s;]+/).map(s => s.replace(/[^0-9]/g, '')).filter(s => s.length >= 3),
-      active: !(r[A.PAUSED - 1] === true || /^(true|yes|paused)$/i.test(String(r[A.PAUSED - 1]).trim())),
+      number: String(r[A.NO - 1]).replace(/[^0-9]/g, ''),
+      owner: '',
+      aliases: [],
+      active: true,
       balance: r[A.BAL - 1] === '' ? null : Number(r[A.BAL - 1]),
       balanceAsOf: r[A.BAL_AT - 1] instanceof Date ? r[A.BAL_AT - 1].getTime() : null,
     }));
@@ -311,31 +351,49 @@ function readAccounts_(ss) {
 
 function publicAccount_(a) { return a; }
 
+/** Kept for older app builds that still send "add account"; it just seeds a row (everything is auto-discovered now). */
 function addAccount_(ss, acc) {
   const nick = String(acc.nickname || '').trim();
-  const num = String(acc.number || '').replace(/[^0-9]/g, '');
   if (!nick) throw new Error('Nickname is required');
-  if (num.length < 4) throw new Error('Account number needs at least 4 digits');
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    if (readAccounts_(ss).some(a => a.nickname.toLowerCase() === nick.toLowerCase())) throw new Error('That nickname already exists');
-    const sh = ensureAccountsSheet_(ss);
-    const aliases = Array.isArray(acc.aliases) ? acc.aliases.join(', ') : String(acc.aliases || '');
-    sh.appendRow([nick, String(acc.bank || ''), "'" + num, /personal/i.test(acc.owner) ? 'Personal' : 'Company', aliases, false, '', '', 'Added from app']);
-    ensureTxnSheet_(ss, sheetNameFor_(nick));
+    if (readAccounts_(ss).some(a => a.nickname.toLowerCase() === nick.toLowerCase())) return { added: nick };
+    const num = String(acc.number || '').replace(/[^0-9]/g, '');
+    const masked = num.length >= 4 ? '••' + num.slice(-4) : num;
+    ensureAccountsSheet_(ss).appendRow([nick, String(acc.bank || ''), masked, '', '']);
     rebuildReports();
     bumpRev_();
     return { added: nick };
   } finally { lock.releaseLock(); }
 }
 
+/** Fills the Accounts tab from every distinct account label already present in Master (so old data shows up too). */
+function syncAccountsFromMaster_(ss) {
+  const master = ss.getSheetByName(TAB.MASTER);
+  const sh = ensureAccountsSheet_(ss);
+  if (!master) return;
+  const last = master.getLastRow();
+  const existing = sh.getLastRow() > 1 ? sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues().map(r => String(r[0]).trim()) : [];
+  const haveSet = {}; existing.forEach(h => haveSet[h] = true);
+  const seen = {};
+  const toAdd = [];
+  if (last > 1) {
+    const vals = master.getRange(2, C.ACC, last - 1, C.NO - C.ACC + 1).getValues(); // cols E (account), F (bank), G (a/c no)
+    vals.forEach(r => {
+      const label = String(r[0]).trim();
+      if (!label || haveSet[label] || seen[label]) return;
+      seen[label] = true;
+      toAdd.push([label, String(r[1]), String(r[2]), '', '']);
+    });
+  }
+  if (toAdd.length) {
+    const start = Math.max(sh.getLastRow(), 1) + 1;
+    sh.getRange(start, 1, toAdd.length, ACC_HEADERS.length).setValues(toAdd);
+  }
+}
+
 // ============================================================ FAST READS FOR THE APP
-//
-// The app never scans the whole sheet:
-//  • totals come from a small per-account, per-month index kept in Script Properties and updated on every push
-//  • history pages read only the 25 rows they need (tabs are newest-first)
-//  • replies are cached; REV changes on every write and on hand edits, so the cache never serves stale data
 
 function home_(ss) {
   const out = summary_(ss);
@@ -378,10 +436,9 @@ function summary_(ss) {
 }
 
 /**
- * One page of transactions, newest first.
- * params: account (nickname, optional), type (CREDIT|DEBIT, optional), q (search, optional),
+ * One page of transactions, newest first — always read from Master and filtered in place.
+ * params: account (label, optional), type (CREDIT|DEBIT, optional), q (search, optional),
  *         offset (row offset, default 0), limit (default 25, max 100)
- * returns: items, nextOffset (pass back for the next page), hasMore, total (rows in that tab)
  */
 function history_(ss, p) {
   p = p || {};
@@ -391,19 +448,20 @@ function history_(ss, p) {
   const limit = Math.min(Math.max(parseInt(p.limit, 10) || PAGE, 1), 100);
   const offset = Math.max(parseInt(p.offset, 10) || 0, 0);
 
-  const sh = ss.getSheetByName(nick ? sheetNameFor_(nick) : TAB.MASTER);
+  const sh = ss.getSheetByName(TAB.MASTER);
   if (!sh) return { items: [], nextOffset: offset, hasMore: false, total: 0 };
   const total = Math.max(sh.getLastRow() - 1, 0);
   const rev = PropertiesService.getScriptProperties().getProperty('REV') || '0';
-  const run = () => scanPage_(sh, total, type, q, offset, limit);
-  return q ? run() : cached_(['h', rev, sh.getSheetId(), total, type, offset, limit].join(':'), run);
+  const run = () => scanPage_(sh, total, nick, type, q, offset, limit);
+  return (q || nick) ? run() : cached_(['h', rev, sh.getSheetId(), total, type, offset, limit].join(':'), run);
 }
 
-function scanPage_(sh, total, type, q, offset, limit) {
+function scanPage_(sh, total, nick, type, q, offset, limit) {
   const W = C.SMS; // everything up to and including the original SMS
-  const filtered = !!(type || q);
+  const filtered = !!(nick || type || q);
   const CHUNK = filtered ? 500 : limit;
   const MAX_SCAN = 5000; // keeps one request well under a few seconds even on huge sheets
+  const nickLower = nick.toLowerCase();
   const items = [];
   let pos = offset, scanned = 0;
   while (pos < total && items.length < limit && scanned < MAX_SCAN) {
@@ -412,6 +470,7 @@ function scanPage_(sh, total, type, q, offset, limit) {
     for (; i < data.length && items.length < limit; i++) {
       const r = data[i];
       if (!String(r[C.ID - 1]).trim()) continue;
+      if (nick && String(r[C.ACC - 1]).trim().toLowerCase() !== nickLower) continue;
       if (type && String(r[C.TYPE - 1]).toUpperCase() !== type) continue;
       if (q && !rowMatches_(r, q)) continue;
       items.push(rowToItem_(r));
@@ -457,7 +516,6 @@ function loadStats_(master, rows, props) {
 
 function rebuildStats_(master, save) {
   const last = master.getLastRow();
-  // columns B (date) … K (debit)
   const data = last > 1 ? master.getRange(2, C.DT, last - 1, C.DR - C.DT + 1).getValues() : [];
   const st = {};
   let n = 0;
@@ -482,7 +540,6 @@ function rebuildStats_(master, save) {
   return st;
 }
 
-/** Called inside the push lock: adds the new rows to the index, or flags a rebuild if the index is out of step. */
 function addToStats_(rows, rowsBefore) {
   const props = PropertiesService.getScriptProperties();
   const all = props.getProperties();
@@ -521,11 +578,26 @@ function recalcTotals() {
 function onEdit(e) {
   try {
     const name = e && e.range ? e.range.getSheet().getName() : '';
-    if (name === TAB.DASH || name === TAB.MONTHLY || name === TAB.DEVICES) return;
+    if (name === TAB.DASH || name === TAB.MONTHLY || name === TAB.DEVICES || name === TAB.FILTER) return;
     const obj = { REV: String(Date.now()) };
     if (name === TAB.MASTER) obj.ST_DIRTY = '1';
     PropertiesService.getScriptProperties().setProperties(obj);
   } catch (err) { /* never block an edit */ }
+}
+
+/** Installable trigger: runs the Filter tab's "Export to Excel / PDF" checkbox buttons. */
+function onEditInstallable(e) {
+  try {
+    if (!e || !e.range) return;
+    const sh = e.range.getSheet();
+    if (sh.getName() !== TAB.FILTER) return;
+    if (String(e.value) !== 'TRUE') return;
+    const r = e.range.getRow(), c = e.range.getColumn();
+    if (r === F.XLS_ROW && c === F.XLS_COL) { e.range.setValue(false); runExport_('xlsx'); }
+    else if (r === F.PDF_ROW && c === F.PDF_COL) { e.range.setValue(false); runExport_('pdf'); }
+  } catch (err) {
+    try { SpreadsheetApp.getActive().toast('Export failed: ' + (err && err.message || err), 'LedgerSync'); } catch (e2) {}
+  }
 }
 
 function bumpRev_() { PropertiesService.getScriptProperties().setProperty('REV', String(Date.now())); }
@@ -540,10 +612,99 @@ function cached_(key, fn) {
 
 function blank_() { return { credit: 0, debit: 0, count: 0 }; }
 function addTo_(b, v) { b.credit += Number(v[0]) || 0; b.debit += Number(v[1]) || 0; b.count += Number(v[2]) || 0; }
-
 function round_(b) { return { credit: round2_(b.credit), debit: round2_(b.debit), count: b.count }; }
 function round2_(n) { return Math.round(n * 100) / 100; }
 function maskNo_(n) { n = String(n || ''); return n.length > 4 ? 'XX' + n.slice(-4) : n; }
+
+// ============================================================ EXPORT (Excel / PDF of the current filter)
+
+function exportFilterToExcel() { runExport_('xlsx'); }
+function exportFilterToPdf() { runExport_('pdf'); }
+
+function runExport_(format) {
+  const ss = SpreadsheetApp.getActive();
+  const fs = ss.getSheetByName(TAB.FILTER);
+  if (!fs) { toast_('Open the Filter tab first (LedgerSync ▸ Rebuild).'); return; }
+  const data = filterRows_(fs);
+  const info = filterSelection_(fs);
+
+  const temp = SpreadsheetApp.create('LedgerSync filter ' + Utilities.formatDate(new Date(), TZ(), 'yyyy-MM-dd HH-mm-ss'));
+  try {
+    const sh = temp.getSheets()[0];
+    sh.setName('Filtered');
+    sh.getRange(1, 1).setValue('LedgerSync — filtered transactions').setFontWeight('bold').setFontSize(14);
+    sh.getRange(2, 1).setValue(info).setFontColor('#555555');
+    const hr = 4;
+    sh.getRange(hr, 1, 1, data.headers.length).setValues([data.headers])
+      .setFontWeight('bold').setBackground(COLORS.header).setFontColor('#FFFFFF');
+    if (data.rows.length) sh.getRange(hr + 1, 1, data.rows.length, data.headers.length).setValues(data.rows);
+    sh.setFrozenRows(hr);
+    [150, 150, 110, 80, 80, 110, 110, 120, 90, 180, 150, 130].forEach((w, i) => { if (i < data.headers.length) sh.setColumnWidth(i + 1, w); });
+    SpreadsheetApp.flush();
+    const file = convertAndSave_(temp.getId(), format, data.rows.length);
+    showExportLink_(file, format, data.rows.length);
+  } finally {
+    try { DriveApp.getFileById(temp.getId()).setTrashed(true); } catch (e) {}
+  }
+}
+
+function convertAndSave_(id, format, count) {
+  const pdf = format === 'pdf';
+  const token = ScriptApp.getOAuthToken();
+  const params = pdf
+    ? 'format=pdf&portrait=true&fitw=true&gridlines=true&size=A4&sheetnames=false&printtitle=false&pagenumbers=false&top_margin=0.4&bottom_margin=0.4&left_margin=0.4&right_margin=0.4'
+    : 'format=xlsx';
+  const url = 'https://docs.google.com/spreadsheets/d/' + id + '/export?' + params;
+  const res = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+  if (res.getResponseCode() >= 300) throw new Error('Google export returned HTTP ' + res.getResponseCode());
+  const stamp = Utilities.formatDate(new Date(), TZ(), 'yyyyMMdd-HHmm');
+  const blob = res.getBlob().setName('LedgerSync-filter-' + stamp + (pdf ? '.pdf' : '.xlsx'));
+  return exportFolder_().createFile(blob);
+}
+
+function exportFolder_() {
+  const name = 'LedgerSync Exports';
+  const it = DriveApp.getFoldersByName(name);
+  return it.hasNext() ? it.next() : DriveApp.createFolder(name);
+}
+
+/** Reads the current results from the Filter tab (the QUERY output under the controls). */
+function filterRows_(fs) {
+  const stdHeaders = ['Date & Time', 'Account', 'Bank', 'A/c', 'Type', 'Credit (₹)', 'Debit (₹)', 'Balance (₹)', 'Mode', 'Party', 'Reference', 'Device'];
+  const last = fs.getLastRow();
+  const hr = F.RESULT_ROW;
+  const firstCell = String(fs.getRange(hr, 1).getDisplayValue()).toLowerCase();
+  if (last <= hr || firstCell.indexOf('no matching') !== -1 || firstCell === '') {
+    return { headers: stdHeaders, rows: [] };
+  }
+  const headers = fs.getRange(hr, 1, 1, F.RESULT_COLS).getDisplayValues()[0].map((h, i) => String(h).trim() || stdHeaders[i]);
+  const raw = fs.getRange(hr + 1, 1, last - hr, F.RESULT_COLS).getValues()
+    .filter(r => String(r[0]).trim() !== '' && String(r[0]).toLowerCase().indexOf('no matching') === -1);
+  return { headers: headers, rows: raw };
+}
+
+function filterSelection_(fs) {
+  const v = fs.getRange(4, 2, 5, 1).getDisplayValues().map(r => String(r[0]).trim());
+  const parts = ['Account: ' + (v[0] || 'All'), 'Bank: ' + (v[1] || 'All'), 'Type: ' + (v[2] || 'All')];
+  if (v[3]) parts.push('From: ' + v[3]);
+  if (v[4]) parts.push('To: ' + v[4]);
+  return 'Filter — ' + parts.join('   ·   ') + '     (exported ' + Utilities.formatDate(new Date(), TZ(), 'dd-MMM-yyyy hh:mm a') + ')';
+}
+
+function showExportLink_(file, format, count) {
+  const url = file.getUrl();
+  const label = format === 'pdf' ? 'PDF' : 'Excel (.xlsx)';
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:Arial;font-size:14px;line-height:1.6">' +
+    '<p>Your <b>' + label + '</b> export is ready — ' + count + ' transaction' + (count === 1 ? '' : 's') + '.</p>' +
+    '<p><a href="' + url + '" target="_blank" style="background:#6D4BFF;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;display:inline-block">Open / download</a></p>' +
+    '<p style="color:#777">Also saved in your Google Drive ▸ <b>LedgerSync Exports</b>.</p></div>'
+  ).setWidth(420).setHeight(210);
+  try { SpreadsheetApp.getUi().showModalDialog(html, 'Export ready'); }
+  catch (e) { toast_('Export saved to Drive ▸ LedgerSync Exports'); }
+}
+
+function toast_(msg) { try { SpreadsheetApp.getActive().toast(msg, 'LedgerSync'); } catch (e) {} }
 
 // ============================================================ SHEET BUILDERS
 
@@ -584,21 +745,23 @@ function ensureTxnSheet_(ss, name) {
 
 function ensureAccountsSheet_(ss) {
   let sh = ss.getSheetByName(TAB.ACCOUNTS);
+  // Migrate an old hand-maintained "Accounts" tab (header "Nickname") out of the way, then build the auto one.
+  if (sh && String(sh.getRange(1, 1).getValue()).trim().toLowerCase() === 'nickname') {
+    try { sh.setName('Accounts (old tagging)'); } catch (e) { try { sh.setName('Accounts old ' + Date.now()); } catch (e2) {} }
+    sh = ss.getSheetByName(TAB.ACCOUNTS);
+  }
   if (sh) return sh;
   sh = ss.insertSheet(TAB.ACCOUNTS);
   sh.getRange(1, 1, 1, ACC_HEADERS.length).setValues([ACC_HEADERS])
     .setFontWeight('bold').setBackground(COLORS.header).setFontColor(COLORS.headerText).setWrap(true).setVerticalAlignment('middle');
-  sh.setRowHeight(1, 42);
+  sh.setRowHeight(1, 40);
   sh.setFrozenRows(1);
-  [170, 140, 170, 120, 170, 110, 140, 160, 220].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [230, 150, 120, 150, 180].forEach((w, i) => sh.setColumnWidth(i + 1, w));
   const rows = sh.getMaxRows() - 1;
-  sh.getRange(2, A.NUM, rows, 1).setNumberFormat('@');
+  sh.getRange(2, A.NO, rows, 1).setNumberFormat('@');
   sh.getRange(2, A.BAL, rows, 1).setNumberFormat(FMT);
   sh.getRange(2, A.BAL_AT, rows, 1).setNumberFormat('dd-MMM-yyyy hh:mm AM/PM');
-  sh.getRange(2, A.OWNER, rows, 1).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['Company', 'Personal'], true).build());
-  sh.getRange(2, A.PAUSED, rows, 1).insertCheckboxes();
-  sh.getRange(2, A.BAL, rows, 2).setBackground('#F1F5F9').setFontColor('#475569');
-  sh.getRange('A2').setNote('One row per bank account. Example:\nHDFC Current | HDFC Bank | 50200012345678 | Company | 4321 | (leave Paused unticked)\n\nOnly SMS for accounts listed here are captured. Columns G–H are filled automatically.');
+  sh.getRange('A2').setNote('This list fills in automatically. Every bank account that sends a debit/credit SMS to a connected phone appears here with its latest balance. No manual entry needed.');
   return sh;
 }
 
@@ -619,9 +782,11 @@ function ensureDevicesSheet_(ss) {
 function rebuildReports() {
   const ss = SpreadsheetApp.getActive();
   ensureTxnSheet_(ss, TAB.MASTER);
-  readAccounts_(ss).forEach(a => ensureTxnSheet_(ss, sheetNameFor_(a.nickname)));
+  ensureAccountsSheet_(ss);
+  syncAccountsFromMaster_(ss);
   buildDashboard_(ss);
   buildMonthly_(ss);
+  buildFilter_(ss);
   orderTabs_(ss);
   bumpRev_();
 }
@@ -640,7 +805,7 @@ function buildDashboard_(ss) {
   sh.getRange('A2').setFormula('="Live · updated "&TEXT(NOW(),"dd mmm yyyy, hh:mm AM/PM")&"  ·  "&TEXT(TODAY(),"mmmm yyyy")')
     .setFontColor('#64748B');
 
-  const head = ['Account', 'Bank', 'A/c', 'Owner', 'Current Balance',
+  const head = ['Account', 'Bank', 'A/c', 'Current Balance',
     'This Month · Credit', 'This Month · Debit', 'This Month · Net',
     'This Year · Credit', 'This Year · Debit', 'This Year · Net',
     'All-time · Credit', 'All-time · Debit', 'All-time · Net', 'Last Transaction'];
@@ -660,48 +825,46 @@ function buildDashboard_(ss) {
     const mth = ',' + M + '$B:$B,">="&' + mStart;
     const yr = ',' + M + '$B:$B,">="&' + yStart;
     f.push([
-      a.nickname, a.bank, '••' + a.number.slice(-4), a.owner,
-      '=IFERROR(INDEX(' + ACC + '$G:$G,MATCH(' + key + ',' + ACC + '$A:$A,0)),"")',
-      '=' + sumIf(cr, mth), '=' + sumIf(dr, mth), '=F' + r + '-G' + r,
-      '=' + sumIf(cr, yr), '=' + sumIf(dr, yr), '=I' + r + '-J' + r,
-      '=' + sumIf(cr), '=' + sumIf(dr), '=L' + r + '-M' + r,
+      a.nickname, a.bank, '••' + a.number.slice(-4),
+      '=IFERROR(INDEX(' + ACC + '$D:$D,MATCH(' + key + ',' + ACC + '$A:$A,0)),"")',
+      '=' + sumIf(cr, mth), '=' + sumIf(dr, mth), '=E' + r + '-F' + r,
+      '=' + sumIf(cr, yr), '=' + sumIf(dr, yr), '=H' + r + '-I' + r,
+      '=' + sumIf(cr), '=' + sumIf(dr), '=K' + r + '-L' + r,
       '=IF(COUNTIF(' + M + '$E:$E,' + key + ')=0,"",MAXIFS(' + M + '$B:$B,' + M + '$E:$E,' + key + '))',
     ]);
   });
   const n = accounts.length;
   if (n) sh.getRange(H + 1, 1, n, head.length).setValues(f);
 
-  // Totals: Company, Personal, Grand
+  // Grand total row
   const tStart = H + 1 + n + 1;
   const first = H + 1, lastR = Math.max(H + n, H + 1);
-  const labels = [['Company total', '"Company"'], ['Personal total', '"Personal"'], ['GRAND TOTAL', null]];
-  labels.forEach((l, i) => {
-    const r = tStart + i;
-    const row = [l[0], '', '', ''];
-    for (let c = 5; c <= 14; c++) {
+  {
+    const r = tStart;
+    const row = ['GRAND TOTAL', '', ''];
+    for (let c = 4; c <= 13; c++) {
       const col = colLetter_(c);
-      const rng = col + first + ':' + col + lastR;
-      row.push(n ? (l[1] ? '=SUMIF($D$' + first + ':$D$' + lastR + ',' + l[1] + ',' + rng + ')' : '=SUM(' + rng + ')') : 0);
+      row.push(n ? '=SUM(' + col + first + ':' + col + lastR + ')' : 0);
     }
     row.push('');
     sh.getRange(r, 1, 1, head.length).setValues([row]).setFontWeight('bold')
-      .setBackground(i === 2 ? COLORS.accent : '#EDE9FE').setFontColor(i === 2 ? '#FFFFFF' : COLORS.header);
-  });
+      .setBackground(COLORS.accent).setFontColor('#FFFFFF');
+  }
 
-  const all = sh.getRange(H + 1, 5, n + 4, 10);
+  const all = sh.getRange(H + 1, 4, n + 2, 10);
   all.setNumberFormat(FMT_NET);
   if (n) {
-    sh.getRange(H + 1, 15, n, 1).setNumberFormat('dd-MMM-yy hh:mm AM/PM');
+    sh.getRange(H + 1, 14, n, 1).setNumberFormat('dd-MMM-yy hh:mm AM/PM');
     sh.getRange(H + 1, 1, n, head.length).applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, false, false);
-    [6, 9, 12].forEach(c => sh.getRange(H + 1, c, n, 1).setFontColor(COLORS.credit));
-    [7, 10, 13].forEach(c => sh.getRange(H + 1, c, n, 1).setFontColor(COLORS.debit));
+    [5, 8, 11].forEach(c => sh.getRange(H + 1, c, n, 1).setFontColor(COLORS.credit));
+    [6, 9, 12].forEach(c => sh.getRange(H + 1, c, n, 1).setFontColor(COLORS.debit));
     sh.getRange(H + 1, 1, n, 1).setFontWeight('bold');
   } else {
-    sh.getRange(H + 1, 1).setValue('Add your bank accounts in the "Accounts" tab, then use LedgerSync ▸ Rebuild Dashboard.').setFontColor('#64748B');
+    sh.getRange(H + 1, 1).setValue('No transactions yet. As soon as a bank SMS is captured on a connected phone, its account appears here.').setFontColor('#64748B');
   }
-  sh.setColumnWidth(1, 190); sh.setColumnWidth(2, 130); sh.setColumnWidth(3, 70); sh.setColumnWidth(4, 90);
-  for (let c = 5; c <= 14; c++) sh.setColumnWidth(c, 125);
-  sh.setColumnWidth(15, 150);
+  sh.setColumnWidth(1, 200); sh.setColumnWidth(2, 130); sh.setColumnWidth(3, 70); sh.setColumnWidth(4, 130);
+  for (let c = 5; c <= 13; c++) sh.setColumnWidth(c, 125);
+  sh.setColumnWidth(14, 150);
   sh.setFrozenRows(H);
   sh.setFrozenColumns(1);
 }
@@ -715,17 +878,110 @@ function buildMonthly_(ss) {
   sh.getRange('A1').setValue('Month-wise totals (all accounts)').setFontWeight('bold').setFontSize(14).setFontColor(COLORS.header);
   sh.getRange('A2').setFormula('=IFERROR(QUERY(' + M + ',"select C, sum(J), sum(K), sum(J)-sum(K), count(A) where C is not null group by C order by C desc label C \'Month\', sum(J) \'Total Credit\', sum(K) \'Total Debit\', sum(J)-sum(K) \'Net\', count(A) \'Txns\'",0),"No data yet")');
   sh.getRange('H1').setValue('Month-wise by account').setFontWeight('bold').setFontSize(14).setFontColor(COLORS.header);
-  sh.getRange('H2').setFormula('=IFERROR(QUERY(' + M + ',"select C, E, H, sum(J), sum(K), sum(J)-sum(K), count(A) where C is not null group by C, E, H order by C desc, E label C \'Month\', E \'Account\', H \'Owner\', sum(J) \'Credit\', sum(K) \'Debit\', sum(J)-sum(K) \'Net\', count(A) \'Txns\'",0),"No data yet")');
+  sh.getRange('H2').setFormula('=IFERROR(QUERY(' + M + ',"select C, E, sum(J), sum(K), sum(J)-sum(K), count(A) where C is not null group by C, E order by C desc, E label C \'Month\', E \'Account\', sum(J) \'Credit\', sum(K) \'Debit\', sum(J)-sum(K) \'Net\', count(A) \'Txns\'",0),"No data yet")');
   sh.getRange('P1').setValue('Year-wise by account').setFontWeight('bold').setFontSize(14).setFontColor(COLORS.header);
   sh.getRange('P2').setFormula('=IFERROR(QUERY(' + M + ',"select D, E, sum(J), sum(K), sum(J)-sum(K) where D is not null group by D, E order by D desc, E label D \'Year\', E \'Account\', sum(J) \'Credit\', sum(K) \'Debit\', sum(J)-sum(K) \'Net\'",0),"No data yet")');
   sh.getRange('B3:D').setNumberFormat(FMT_NET);
-  sh.getRange('K3:M').setNumberFormat(FMT_NET);
+  sh.getRange('J3:L').setNumberFormat(FMT_NET);
   sh.getRange('R3:T').setNumberFormat(FMT_NET);
-  ['A2:E2', 'H2:N2', 'P2:T2'].forEach(a => sh.getRange(a).setFontWeight('bold').setBackground(COLORS.header).setFontColor('#FFFFFF'));
-  sh.setColumnWidth(1, 90); sh.setColumnWidth(8, 90); sh.setColumnWidth(9, 170); sh.setColumnWidth(16, 70); sh.setColumnWidth(17, 170);
-  [2, 3, 4, 11, 12, 13, 18, 19, 20].forEach(c => sh.setColumnWidth(c, 125));
-  sh.setColumnWidth(6, 30); sh.setColumnWidth(7, 30); sh.setColumnWidth(15, 30);
+  ['A2:E2', 'H2:M2', 'P2:T2'].forEach(a => sh.getRange(a).setFontWeight('bold').setBackground(COLORS.header).setFontColor('#FFFFFF'));
+  sh.setColumnWidth(1, 90); sh.setColumnWidth(8, 90); sh.setColumnWidth(9, 190); sh.setColumnWidth(16, 70); sh.setColumnWidth(17, 190);
+  [2, 3, 4, 10, 11, 12, 18, 19, 20].forEach(c => sh.setColumnWidth(c, 125));
+  sh.setColumnWidth(7, 30); sh.setColumnWidth(15, 30);
   sh.setFrozenRows(2);
+}
+
+// ------------------------------------------------------------ Filter & Export tab
+
+function buildFilter_(ss) {
+  let sh = ss.getSheetByName(TAB.FILTER);
+  if (!sh) sh = ss.insertSheet(TAB.FILTER, 3);
+  sh.clear();
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
+  sh.setHiddenGridlines(true);
+
+  const M = "'" + TAB.MASTER + "'!";
+
+  sh.getRange('A1').setValue('LedgerSync · Filter & Export').setFontSize(18).setFontWeight('bold').setFontColor(COLORS.header);
+  sh.getRange('A2').setValue('Pick any mix of account, bank, type and date range. The table and totals update instantly. Then tick a box on the right (or use the LedgerSync menu) to export.')
+    .setFontColor('#64748B');
+
+  // ---- helper lists (hidden, columns P / Q) ----
+  const accounts = readAccounts_(ss).filter(a => a.active).map(a => a.nickname);
+  const banks = [];
+  readAccounts_(ss).forEach(a => { if (a.bank && banks.indexOf(a.bank) === -1) banks.push(a.bank); });
+  const accList = ['All'].concat(accounts);
+  const bankList = ['All'].concat(banks);
+  sh.getRange(1, F.LIST_ACC, accList.length, 1).setValues(accList.map(v => [v]));
+  sh.getRange(1, F.LIST_BANK, bankList.length, 1).setValues(bankList.map(v => [v]));
+
+  // ---- controls ----
+  const labels = [['Account'], ['Bank'], ['Type'], ['From date'], ['To date']];
+  sh.getRange(4, 1, 5, 1).setValues(labels).setFontWeight('bold').setFontColor('#334155');
+  sh.getRange(4, 2).setValue('All');
+  sh.getRange(5, 2).setValue('All');
+  sh.getRange(6, 2).setValue('All');
+  sh.getRange(7, 2).setValue('');
+  sh.getRange(8, 2).setValue('');
+  sh.getRange(7, 2, 2, 1).setNumberFormat('dd-MMM-yyyy');
+  sh.getRange(4, 2, 5, 1).setBackground('#F8FAFC').setFontColor('#0F172A')
+    .setBorder(true, true, true, true, true, true, '#CBD5E1', SpreadsheetApp.BorderStyle.SOLID);
+
+  const dv = (col) => SpreadsheetApp.newDataValidation().requireValueInRange(sh.getRange(1, col, (col === F.LIST_ACC ? accList.length : bankList.length), 1), true).setAllowInvalid(false).build();
+  sh.getRange(F.ACC).setDataValidation(dv(F.LIST_ACC));
+  sh.getRange(F.BANK).setDataValidation(dv(F.LIST_BANK));
+  sh.getRange(F.TYPE).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['All', 'CREDIT', 'DEBIT'], true).setAllowInvalid(false).build());
+
+  // ---- totals box (D4:E7) ----
+  const b4 = '$B$4', b5 = '$B$5', b6 = '$B$6', b7 = '$B$7', b8 = '$B$8';
+  const cond =
+    '((' + M + '$E$2:$E=' + b4 + ')+(' + b4 + '="All"))>0,' +
+    '((' + M + '$F$2:$F=' + b5 + ')+(' + b5 + '="All"))>0,' +
+    '((' + M + '$I$2:$I=' + b6 + ')+(' + b6 + '="All"))>0,' +
+    '(' + M + '$B$2:$B>=IF(' + b7 + '="",DATE(1900,1,1),' + b7 + ')),' +
+    '(' + M + '$B$2:$B<IF(' + b8 + '="",DATE(2999,1,1),' + b8 + '+1))';
+  sh.getRange('D4').setValue('Credit (₹)').setFontWeight('bold').setFontColor('#334155');
+  sh.getRange('E4').setFormula('=IFERROR(SUMPRODUCT(' + cond + ',N(' + M + '$J$2:$J)),0)');
+  sh.getRange('D5').setValue('Debit (₹)').setFontWeight('bold').setFontColor('#334155');
+  sh.getRange('E5').setFormula('=IFERROR(SUMPRODUCT(' + cond + ',N(' + M + '$K$2:$K)),0)');
+  sh.getRange('D6').setValue('Net (₹)').setFontWeight('bold').setFontColor('#334155');
+  sh.getRange('E6').setFormula('=E4-E5');
+  sh.getRange('D7').setValue('Transactions').setFontWeight('bold').setFontColor('#334155');
+  sh.getRange('E7').setFormula('=IFERROR(SUMPRODUCT(' + cond + '),0)');
+  sh.getRange('E4:E6').setNumberFormat(FMT_NET);
+  sh.getRange('E7').setNumberFormat('#,##0');
+  sh.getRange('D4:E7').setBorder(true, true, true, true, true, true, '#E2E8F0', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('E4').setFontColor(COLORS.credit).setFontWeight('bold');
+  sh.getRange('E5').setFontColor(COLORS.debit).setFontWeight('bold');
+
+  // ---- export "buttons" (checkboxes at G4 / G6) ----
+  sh.getRange(F.XLS_ROW, F.XLS_COL).insertCheckboxes().setValue(false);
+  sh.getRange(F.XLS_ROW, F.XLS_COL + 1).setValue('⬇  Export to Excel (.xlsx)').setFontWeight('bold').setFontColor('#0F766E');
+  sh.getRange(F.PDF_ROW, F.PDF_COL).insertCheckboxes().setValue(false);
+  sh.getRange(F.PDF_ROW, F.PDF_COL + 1).setValue('⬇  Export to PDF').setFontWeight('bold').setFontColor('#9A3412');
+  sh.getRange(5, F.XLS_COL + 1).setValue('(tick a box to download the filtered rows)').setFontColor('#94A3B8').setFontSize(9);
+  sh.getRange(7, F.PDF_COL + 1).setValue('exports exactly what the filter shows').setFontColor('#94A3B8').setFontSize(9);
+
+  // ---- results (QUERY under the controls) ----
+  sh.getRange('A10').setValue('Matching transactions').setFontWeight('bold').setFontSize(12).setFontColor(COLORS.header);
+  const q =
+    '"select B,E,F,G,I,J,K,L,M,N,O,Q where B is not null"' +
+    '&IF(' + b4 + '="All",""," and E = \'"&' + b4 + '&"\'")' +
+    '&IF(' + b5 + '="All",""," and F = \'"&' + b5 + '&"\'")' +
+    '&IF(' + b6 + '="All",""," and I = \'"&' + b6 + '&"\'")' +
+    '&IF(' + b7 + '=""," "," and toDate(B) >= date \'"&TEXT(' + b7 + ',"yyyy-MM-dd")&"\'")' +
+    '&IF(' + b8 + '=""," "," and toDate(B) <= date \'"&TEXT(' + b8 + ',"yyyy-MM-dd")&"\'")' +
+    '&" order by B desc label B \'Date & Time\', E \'Account\', F \'Bank\', G \'A/c\', I \'Type\', J \'Credit (₹)\', K \'Debit (₹)\', L \'Balance (₹)\', M \'Mode\', N \'Party\', O \'Reference\', Q \'Device\'"';
+  sh.getRange(F.RESULT_ROW, 1).setFormula('=IFERROR(QUERY(' + M + 'A1:S,' + q + ',1),"No matching transactions")');
+  sh.getRange(F.RESULT_ROW, 1, 1, F.RESULT_COLS).setFontWeight('bold').setBackground(COLORS.header).setFontColor('#FFFFFF');
+  const fmtRows = Math.max(sh.getMaxRows() - F.RESULT_ROW, 1);
+  sh.getRange(F.RESULT_ROW + 1, 6, fmtRows, 3).setNumberFormat(FMT);   // Credit / Debit / Balance columns
+  sh.getRange(F.RESULT_ROW + 1, 1, fmtRows, 1).setNumberFormat('dd-MMM-yyyy  hh:mm AM/PM');
+
+  [150, 160, 110, 80, 80, 110, 110, 120, 90, 170, 150, 120].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.hideColumns(F.LIST_ACC, 2); // hide the helper lists (P, Q)
+  sh.setFrozenRows(F.RESULT_ROW);
+  sh.setColumnWidth(F.XLS_COL + 1, 240);
 }
 
 function resortAll() {
@@ -743,7 +999,7 @@ function orderTabs_(ss) {
 }
 
 function orderTabsInner_(ss) {
-  [TAB.DASH, TAB.MONTHLY, TAB.MASTER].forEach((name, i) => {
+  [TAB.DASH, TAB.MONTHLY, TAB.MASTER, TAB.FILTER].forEach((name, i) => {
     const sh = ss.getSheetByName(name);
     if (sh) { ss.setActiveSheet(sh); ss.moveActiveSheet(i + 1); }
   });
@@ -756,9 +1012,9 @@ function orderTabsInner_(ss) {
 
 function colLetter_(c) { let s = ''; while (c > 0) { const m = (c - 1) % 26; s = String.fromCharCode(65 + m) + s; c = Math.floor((c - 1) / 26); } return s; }
 
-/** Rebuilds Dashboard + per-account tabs when the account list changed (e.g. hand edits in the Accounts tab). */
+/** Rebuilds Dashboard + Filter when the account list changed (e.g. a new account was detected). */
 function syncReportsIfAccountsChanged_(ss) {
-  const sig = readAccounts_(ss).map(a => a.nickname + (a.active ? '' : '-') + a.owner).join('|');
+  const sig = readAccounts_(ss).map(a => a.nickname).join('|');
   const props = PropertiesService.getScriptProperties();
   if (props.getProperty('ACC_SIG') === sig) return;
   rebuildReports();

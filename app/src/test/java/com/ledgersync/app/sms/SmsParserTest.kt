@@ -137,7 +137,32 @@ class SmsParserTest {
     @Test fun scheduledIsIgnored() = skip("VM-HDFCBK", "Rs 1,999 will be debited from A/c XX1234 on 15-11-26 towards NETFLIX autopay.")
     @Test fun billReminderIsIgnored() = skip("VM-SBICRD", "Total amount due Rs 24,500 on A/c XX5678. Payment due date 20-11-26.")
     @Test fun loanPromoIsIgnored() = skip("VM-HDFCBK", "You are eligible for a pre-approved loan of Rs 5,00,000 credited instantly to A/c XX1234!")
-    @Test fun untrackedAccountIsIgnored() = skip("VM-HDFCBK", "Rs.500.00 debited from A/c XX4444 on 10-11-26. Avl bal Rs 1,000.00")
+    // Capture-all mode: an account that isn't in the (optional) tagged list is still captured and auto-grouped.
+    @Test fun untrackedAccountIsNowCaptured() {
+        val r = ok("VM-HDFCBK", "Rs.500.00 debited from A/c XX4444 on 10-11-26. Avl bal Rs 1,000.00")
+        assertEquals("DEBIT", r.parsed.type)
+        assertEquals(500.0, r.parsed.amount, 0.001)
+        assertEquals("HDFC Bank ••4444", r.account.nickname)
+    }
+
+    // With no tagged accounts at all, any bank debit/credit SMS is captured (the normal auto-group model).
+    @Test fun capturesWithNoConfiguredAccounts() {
+        val r = SmsParser.evaluate("VM-ICICIT", "ICICI Bank Acct XX321 debited for Rs 5,000.00 on 10-Nov-26; ZOMATO LTD credited. UPI:631456789012.", emptyList(), bankSendersOnly = true)
+        assertTrue(r is ParseResult.Ok)
+        r as ParseResult.Ok
+        assertEquals("DEBIT", r.parsed.type)
+        assertEquals("ICICI Bank ••321", r.account.nickname)
+    }
+
+    @Test fun autoCaptureSameSmsOnTwoPhonesGivesSameKey() {
+        val body = "Sent Rs.1,250.00 From HDFC Bank A/C *1234 To RAHUL KUMAR On 10/11/26 Ref 631498765432"
+        val a = SmsParser.evaluate("VM-HDFCBK", body, emptyList(), true) as ParseResult.Ok
+        val b = SmsParser.evaluate("VM-HDFCBK", body, emptyList(), true) as ParseResult.Ok
+        assertEquals(
+            SmsParser.txnKey(a.account, a.parsed, body, 1_762_760_000_000),
+            SmsParser.txnKey(b.account, b.parsed, body, 1_762_760_009_000),
+        )
+    }
     @Test fun personalNumberSenderIsIgnored() = skip("+919876543210", "Rs.500.00 debited from A/c XX1234 on 10-11-26.")
     @Test fun normalChatIsIgnored() = skip("VM-HDFCBK", "Dear customer, our branch will remain closed on Monday.")
 

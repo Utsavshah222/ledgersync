@@ -109,11 +109,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val fallbackTxns: Flow<List<TxnEntity>> = sheetSummary.map { it == null }.distinctUntilChanged()
         .flatMapLatest { none -> if (none) dao.observeAll() else flowOf(emptyList()) }
 
-    val dashboard: StateFlow<DashboardData?> = combine(sheetSummary, accounts, unsettled, fallbackTxns) { sheet, accs, extra, all ->
+    val dashboard: StateFlow<DashboardData?> = combine(sheetSummary, accounts, unsettled, fallbackTxns) { sheet, _, extra, all ->
         withContext(Dispatchers.Default) {
             when {
                 sheet != null -> DashboardData(withLocal(sheet, extra), fromSheet = true)
-                accs.isNotEmpty() -> DashboardData(localSummary(accs, all), fromSheet = false)
+                all.isNotEmpty() -> DashboardData(localSummary(all), fromSheet = false)
                 else -> null
             }
         }
@@ -398,25 +398,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             timeInMillis = startOfMonth(); add(Calendar.MONTH, -n)
         }.timeInMillis
 
-        /** Offline fallback: totals from entries captured on this phone. */
-        fun localSummary(accs: List<BankAccount>, list: List<TxnEntity>): Summary {
+        /**
+         * Offline / first-run fallback: the whole dashboard is derived from the transactions captured on this phone,
+         * grouped by the auto account label (bank + last 4). No pre-configured account list is needed any more.
+         */
+        fun localSummary(list: List<TxnEntity>): Summary {
             val m = startOfMonth(); val y = startOfYear()
             fun stats(items: List<TxnEntity>) = items.fold(PeriodStats()) { acc, t ->
                 acc + if (t.isCredit) PeriodStats(t.amount, 0.0, 1) else PeriodStats(0.0, t.amount, 1)
             }
             val by = list.groupBy { it.accountNick }
             return Summary(
-                accounts = accs.filter { it.active }.map { a ->
-                    val items = by[a.nickname].orEmpty()
-                    val latest = items.filter { it.balance != null }.maxByOrNull { it.timestamp }
-                    AccountSummary(
-                        nickname = a.nickname, bank = a.bank, owner = a.owner, masked = a.masked,
-                        balance = latest?.balance ?: a.balance, balanceAsOf = latest?.timestamp ?: a.balanceAsOf,
-                        month = stats(items.filter { it.timestamp >= m }),
-                        year = stats(items.filter { it.timestamp >= y }),
-                        all = stats(items),
-                    )
-                },
+                accounts = by.entries
+                    .map { (nick, items) ->
+                        val any = items.first()
+                        val latest = items.filter { it.balance != null }.maxByOrNull { it.timestamp }
+                        AccountSummary(
+                            nickname = nick, bank = any.bank, owner = any.owner, masked = any.accountMasked,
+                            balance = latest?.balance, balanceAsOf = latest?.timestamp,
+                            month = stats(items.filter { it.timestamp >= m }),
+                            year = stats(items.filter { it.timestamp >= y }),
+                            all = stats(items),
+                        )
+                    }
+                    .sortedByDescending { it.all.credit + it.all.debit },
                 fetchedAt = System.currentTimeMillis(),
             )
         }

@@ -32,8 +32,11 @@ object UpdateChecker {
                 val tag = o.optString("tag_name").removePrefix("v").trim()
                 if (tag.isEmpty() || !isNewer(tag, currentVersion)) return@use null
                 val assets = o.optJSONArray("assets")
-                val apk = (0 until (assets?.length() ?: 0)).map { assets!!.getJSONObject(it) }
-                    .firstOrNull { it.optString("name").endsWith(".apk", true) }
+                val apks = (0 until (assets?.length() ?: 0)).map { assets!!.getJSONObject(it) }
+                    .filter { it.optString("name").endsWith(".apk", true) }
+                // A release carries both editions' APKs — pick the one matching this edition (Admin / Staff).
+                val apk = apks.firstOrNull { it.optString("name").contains(BuildConfig.APK_TAG, true) }
+                    ?: apks.firstOrNull()
                 AppUpdate(
                     version = tag,
                     apkUrl = apk?.optString("browser_download_url") ?: o.optString("html_url"),

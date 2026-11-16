@@ -62,8 +62,6 @@ import com.ledgersync.app.data.Period
 import com.ledgersync.app.data.PeriodStats
 import com.ledgersync.app.data.TxnEntity
 
-private val owners = listOf("All", "Company", "Personal")
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: () -> Unit, onOpenSettings: () -> Unit) {
@@ -75,15 +73,13 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
     val failed by vm.failed.collectAsState()
     val syncing by vm.syncing.collectAsState()
     vm.settings.version.collectAsState().value
-    var ownerIdx by rememberSaveable { mutableIntStateOf(0) }
     var periodIdx by rememberSaveable { mutableIntStateOf(0) }
     var detail by remember { mutableStateOf<Pair<TxnEntity, String?>?>(null) }
     val update by vm.update.collectAsState()
     val ctx = LocalContext.current
 
     val period = Period.entries[periodIdx]
-    val all = dash?.summary?.accounts.orEmpty()
-    val shown = if (ownerIdx == 0) all else all.filter { it.owner.equals(owners[ownerIdx], true) }
+    val shown = dash?.summary?.accounts.orEmpty()
     val totals = shown.fold(PeriodStats()) { a, s -> a + s.period(period) }
     val totalBalance = shown.sumOf { it.balance ?: 0.0 }
     // Newest from every phone (queued entries on this phone first); falls back to this phone before the first sync.
@@ -124,7 +120,7 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
             item {
                 HeroCard(
                     balance = totalBalance, count = shown.size, fromSheet = dash?.fromSheet == true,
-                    updated = dash?.summary?.fetchedAt ?: 0L, ownerIdx = ownerIdx, onOwner = { ownerIdx = it },
+                    updated = dash?.summary?.fetchedAt ?: 0L,
                 )
             }
 
@@ -146,7 +142,7 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
                     GlassCard {
                         EmptyState(
                             Icons.Rounded.AccountBalance, "No accounts yet",
-                            "Add the company's bank accounts in the Accounts tab or in the sheet's “Accounts” tab.",
+                            "Every bank account is detected automatically from the SMS it receives. The first captured message will create its card here.",
                         )
                     }
                 }
@@ -167,7 +163,7 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
                         EmptyState(
                             if (vm.settings.isConnected) Icons.Rounded.Inbox else Icons.Rounded.CloudOff,
                             "Waiting for bank SMS",
-                            "New debit & credit messages for tracked accounts appear here instantly and go straight to the sheet.",
+                            "Every debit & credit message on this phone appears here instantly and goes straight to the sheet.",
                         )
                     }
                 }
@@ -184,7 +180,7 @@ fun HomeScreen(vm: MainViewModel, onOpenActivity: () -> Unit, onOpenAccounts: ()
 }
 
 @Composable
-private fun HeroCard(balance: Double, count: Int, fromSheet: Boolean, updated: Long, ownerIdx: Int, onOwner: (Int) -> Unit) {
+private fun HeroCard(balance: Double, count: Int, fromSheet: Boolean, updated: Long) {
     val shown = animatedDouble(balance)
     Box(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(LS.Hero)
@@ -208,22 +204,6 @@ private fun HeroCard(balance: Double, count: Int, fromSheet: Boolean, updated: L
                 "$count account${if (count == 1) "" else "s"} · updated ${relativeTime(updated)}",
                 color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall,
             )
-            Spacer(Modifier.height(18.dp))
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.18f)).padding(3.dp)
-            ) {
-                owners.forEachIndexed { i, o ->
-                    val active = i == ownerIdx
-                    Box(
-                        Modifier.weight(1f).clip(RoundedCornerShape(11.dp))
-                            .background(if (active) Color.White else Color.Transparent)
-                            .clickable { onOwner(i) }.padding(vertical = 8.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(o, color = if (active) Color(0xFF2B2A6B) else Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
-                    }
-                }
-            }
         }
     }
 }
@@ -282,8 +262,10 @@ private fun AccountCard(a: AccountSummary, period: Period, onHistory: () -> Unit
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(a.nickname, style = MaterialTheme.typography.titleSmall, color = LS.Text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                    Spacer(Modifier.width(8.dp))
-                    Pill(a.owner, if (a.owner.equals("Personal", true)) LS.Amber else LS.Cyan)
+                    if (a.owner.isNotBlank()) {
+                        Spacer(Modifier.width(8.dp))
+                        Pill(a.owner, if (a.owner.equals("Personal", true)) LS.Amber else LS.Cyan)
+                    }
                 }
                 Text("${a.bank} ${a.masked}", style = MaterialTheme.typography.bodySmall, color = LS.Muted, maxLines = 1)
             }

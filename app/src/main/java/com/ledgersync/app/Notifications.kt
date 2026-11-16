@@ -43,16 +43,19 @@ object Notifications {
 
     fun showTxn(ctx: Context, t: TxnEntity) {
         if (!canPost(ctx)) return
+        // Staff edition must never show money data — just confirm a bank SMS was captured.
+        val admin = BuildConfig.IS_ADMIN
         val sign = if (t.isCredit) "+" else "−"
-        val title = "$sign${formatInr(t.amount)} · ${t.accountNick}"
-        val text = listOf(if (t.isCredit) "Credited" else "Debited", t.party.takeIf { it.isNotBlank() }, t.mode)
-            .filterNotNull().joinToString(" · ")
+        val title = if (admin) "$sign${formatInr(t.amount)} · ${t.accountNick}" else "Bank SMS captured"
+        val text = if (admin)
+            listOf(if (t.isCredit) "Credited" else "Debited", t.party.takeIf { it.isNotBlank() }, t.mode).filterNotNull().joinToString(" · ")
+        else "Sent to the company sheet"
         val n = NotificationCompat.Builder(ctx, CH_TXN)
             .setSmallIcon(R.drawable.ic_stat_sync)
             .setColor(if (t.isCredit) 0xFF22C55E.toInt() else 0xFFFF5C7A.toInt())
             .setContentTitle(title)
             .setContentText(text)
-            .setSubText("Saved to sheet queue")
+            .setSubText(if (admin) "Saved to sheet queue" else null)
             .setContentIntent(openApp(ctx))
             .setAutoCancel(true)
             .setGroup("txns")

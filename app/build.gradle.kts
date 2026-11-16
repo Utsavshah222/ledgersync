@@ -34,6 +34,27 @@ android {
         )
     }
 
+    // Two editions, installable side-by-side on the same phone:
+    //   admin — full dashboard, balances, history, filters (for the owner / accounts manager)
+    //   staff — setup + a tiny "it's working" status screen; it only pushes SMS to the sheet, shows no money data
+    flavorDimensions += "edition"
+    productFlavors {
+        create("admin") {
+            dimension = "edition"
+            // keeps the original package id, so existing installs upgrade to the Admin edition in place
+            resValue("string", "app_name", "LedgerSync Admin")
+            buildConfigField("boolean", "IS_ADMIN", "true")
+            buildConfigField("String", "APK_TAG", "\"admin\"")
+        }
+        create("staff") {
+            dimension = "edition"
+            applicationIdSuffix = ".staff"
+            resValue("string", "app_name", "LedgerSync Staff")
+            buildConfigField("boolean", "IS_ADMIN", "false")
+            buildConfigField("String", "APK_TAG", "\"staff\"")
+        }
+    }
+
     signingConfigs {
         create("release") {
             val store = signing("storeFile", "KEYSTORE_FILE")

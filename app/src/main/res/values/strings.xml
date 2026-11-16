@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">LedgerSync</string>
+    <!-- app_name is provided per edition (admin / staff) via resValue in app/build.gradle.kts -->
 </resources>

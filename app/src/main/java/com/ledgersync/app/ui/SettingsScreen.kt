@@ -155,7 +155,7 @@ fun SettingsScreen(vm: MainViewModel) {
         SectionHeader("Import past SMS")
         GlassCard {
             Text(
-                "Reads the inbox and adds older bank messages for tracked accounts. The sheet skips anything it already has, so it's safe to run again.",
+                "Reads the inbox and adds older bank debit & credit messages. The sheet skips anything it already has, so it's safe to run again.",
                 color = LS.Muted, style = MaterialTheme.typography.bodySmall,
             )
             Spacer(Modifier.height(12.dp))

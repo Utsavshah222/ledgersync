@@ -209,18 +209,38 @@ object SmsParser {
         return a.isNotEmpty() && (a.contains(b) || b.contains(a))
     }
 
-    /** Full decision used by the receiver, the inbox scanner and the in-app Parser Lab. */
-    fun evaluate(sender: String, body: String, accounts: List<BankAccount>, bankSendersOnly: Boolean): ParseResult {
+    /**
+     * Full decision used by the receiver, the inbox scanner and the in-app Parser Lab.
+     *
+     * [captureAll] = true (the normal mode now): every bank debit/credit SMS on the phone is captured. There is no
+     * tracked-account list to maintain — the account is derived straight from the message (bank + the account digits
+     * it names), so the sheet can auto-group by "<Bank> ••<last4>". If [accounts] still has entries (e.g. an older
+     * tagged setup) a matching one is preferred so its nickname/owner are kept.
+     */
+    fun evaluate(sender: String, body: String, accounts: List<BankAccount>, bankSendersOnly: Boolean, captureAll: Boolean = true): ParseResult {
         if (bankSendersOnly && !isBusinessSender(sender)) return ParseResult.Skip("Sender is a personal number, not a bank")
         REJECT.firstOrNull { it.first.containsMatchIn(body) }?.let { return ParseResult.Skip(it.second) }
         if (FAILED.containsMatchIn(body) && !MONEY_BACK.containsMatchIn(body)) return ParseResult.Skip("Failed / declined transaction")
         val p = parse(sender, body) ?: return ParseResult.Skip("Not a debit/credit message")
-        if (accounts.none { it.active }) return ParseResult.Skip("No accounts configured yet", p)
-        val acc = matchAccount(p, accounts)
-            ?: return ParseResult.Skip(
+
+        matchAccount(p, accounts)?.let { return ParseResult.Ok(p, it) }
+
+        if (!captureAll) {
+            if (accounts.none { it.active }) return ParseResult.Skip("No accounts configured yet", p)
+            return ParseResult.Skip(
                 if (p.accountTokens.isEmpty()) "No account number in message" else "Account ${p.accountTokens.joinToString()} is not in the tracked list", p
             )
-        return ParseResult.Ok(p, acc)
+        }
+        return ParseResult.Ok(p, autoAccount(p))
+    }
+
+    /** Builds a display identity for a captured SMS that isn't tied to any pre-configured account. */
+    fun autoAccount(p: ParsedSms): BankAccount {
+        val digits = p.accountTokens.firstOrNull { it.length >= 3 } ?: ""
+        val bank = p.senderBank?.takeIf { it.isNotBlank() } ?: "Bank"
+        val last4 = digits.takeLast(4)
+        val nick = if (last4.isNotEmpty()) "$bank ••$last4" else bank
+        return BankAccount(nickname = nick, bank = bank, number = digits, owner = "")
     }
 
     /** Stable ID shared by every device that receives this SMS, so the sheet never gets duplicates. */
