@@ -241,6 +241,7 @@ private fun ConnectStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Uni
     var url by remember { mutableStateOf(vm.settings.scriptUrl) }
     var key by remember { mutableStateOf(vm.settings.secretKey) }
     var device by remember { mutableStateOf(vm.settings.deviceName) }
+    var bank by remember { mutableStateOf(vm.settings.bankName) }
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
@@ -255,6 +256,8 @@ private fun ConnectStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Uni
         LsTextField(key, { key = it.trim() }, "Secret key", leading = Icons.Rounded.Key)
         Spacer(Modifier.height(12.dp))
         LsTextField(device, { device = it }, "Name for this phone", leading = Icons.Rounded.PhoneAndroid, supporting = "Shown in the sheet's “Device” column — e.g. Accounts Manager")
+        Spacer(Modifier.height(12.dp))
+        LsTextField(bank, { bank = it }, "Bank name (optional)", leading = Icons.Rounded.AccountBalance, supporting = "Used as the “Bank” for every SMS from this phone — e.g. HDFC Current. Leave blank to detect it automatically.")
         msg?.let { (ok, m) ->
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -268,7 +271,7 @@ private fun ConnectStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Uni
             busy = true; msg = null
             scope.launch {
                 vm.testConnection(url, key).onSuccess {
-                    vm.saveConnection(url, key, device)
+                    vm.saveConnection(url, key, device, bank)
                     val n = vm.refreshAccounts().getOrDefault(0)
                     msg = true to "$it"
                     busy = false

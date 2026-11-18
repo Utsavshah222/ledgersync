@@ -31,6 +31,15 @@ class Settings private constructor(context: Context) {
         get() = sp.getString("deviceName", null) ?: "${Build.MANUFACTURER} ${Build.MODEL}".trim()
         set(v) = sp.edit().putString("deviceName", v.trim()).apply()
 
+    /**
+     * Bank name the user types for THIS phone. When set, every SMS captured here is filed under this exact
+     * name in the sheet's "Bank" column (and its account group), instead of the name auto-detected from the
+     * sender ID. Blank = keep the automatic detection.
+     */
+    var bankName: String
+        get() = sp.getString("bankName", "") ?: ""
+        set(v) = sp.edit().putString("bankName", v.trim()).apply()
+
     var onboarded: Boolean
         get() = sp.getBoolean("onboarded", false)
         set(v) = sp.edit().putBoolean("onboarded", v).apply()
@@ -76,6 +85,7 @@ class Settings private constructor(context: Context) {
         private val RETIRED_URLS = setOf(
             "https://script.google.com/macros/s/AKfycbycALS2aqb8trvSf3PGv_NsYBagb7F0D8z3C9jo2wmZt_gtI87UyXSoEVpfm_RZ9DWv/exec",
             "https://script.google.com/macros/s/AKfycbzVXIBmhyPsPvDZHnAMIUaIuLS7S5mnGqH9AouqSorKAseR4lDKsZPfYjZkkDXs1Kzm/exec",
+            "https://script.google.com/macros/s/AKfycbzTRewFI3e3V5LXSP-Sa9jkPmmtZcUpMf20F5q8n54tob11u2M8ZLzJCyX_L6K7i2ft/exec",
         )
         @Volatile private var instance: Settings? = null
         fun get(context: Context): Settings = instance ?: synchronized(this) {

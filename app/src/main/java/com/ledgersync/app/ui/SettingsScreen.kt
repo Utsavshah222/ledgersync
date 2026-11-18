@@ -24,6 +24,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AccountBalance
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -85,6 +86,7 @@ fun SettingsScreen(vm: MainViewModel) {
     var url by remember { mutableStateOf(s.scriptUrl) }
     var key by remember { mutableStateOf(s.secretKey) }
     var device by remember { mutableStateOf(s.deviceName) }
+    var bank by remember { mutableStateOf(s.bankName) }
     var showKey by remember { mutableStateOf(false) }
     var testing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
@@ -126,6 +128,8 @@ fun SettingsScreen(vm: MainViewModel) {
             )
             Spacer(Modifier.height(10.dp))
             LsTextField(device, { device = it }, "This device's name (shown in the sheet)", leading = Icons.Rounded.PhoneAndroid)
+            Spacer(Modifier.height(10.dp))
+            LsTextField(bank, { bank = it }, "Bank name (shown in the sheet)", leading = Icons.Rounded.AccountBalance, supporting = "Used as the “Bank” for every SMS from this phone. Leave blank to detect it automatically.")
             status?.let { (ok, msg) ->
                 Spacer(Modifier.height(10.dp))
                 Text(msg, color = if (ok) LS.Credit else LS.Debit, style = MaterialTheme.typography.bodySmall)
@@ -135,7 +139,7 @@ fun SettingsScreen(vm: MainViewModel) {
                 testing = true; status = null
                 scope.launch {
                     vm.testConnection(url, key)
-                        .onSuccess { status = true to it; vm.saveConnection(url, key, device); vm.syncNow(true) }
+                        .onSuccess { status = true to it; vm.saveConnection(url, key, device, bank); vm.syncNow(true) }
                         .onFailure { status = false to (it.message ?: "Failed") }
                     testing = false
                 }

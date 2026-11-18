@@ -281,9 +281,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         "Connected to “${r.optString("sheet", "your sheet")}” · ${r.optInt("accounts")} accounts"
     }
 
-    fun saveConnection(url: String, key: String, device: String) {
+    fun saveConnection(url: String, key: String, device: String, bankName: String = settings.bankName) {
         settings.scriptUrl = url; settings.secretKey = key
         if (device.isNotBlank()) settings.deviceName = device
+        settings.bankName = bankName // blank is allowed — it switches this phone back to automatic bank detection
         reloadFeed()
     }
 
@@ -322,7 +323,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val r = SmsParser.evaluate(sender.ifBlank { "VM-BANKSMS" }, body, accounts.value, settings.bankSendersOnly)
         val p = when (r) { is ParseResult.Ok -> r.parsed; is ParseResult.Skip -> r.parsed }
         val head = when (r) {
-            is ParseResult.Ok -> "✅ WILL BE SAVED → ${r.account.nickname} (${r.account.bank} ${r.account.masked})"
+            is ParseResult.Ok -> {
+                // Mirror Ingest: a bank name set for this phone wins over the auto-detected one.
+                val override = settings.bankName
+                val bank = override.ifBlank { r.account.bank }
+                val nick = if (override.isNotBlank()) {
+                    val last4 = r.account.digits.takeLast(4)
+                    if (last4.isNotEmpty()) "$override ••$last4" else override
+                } else r.account.nickname
+                "✅ WILL BE SAVED → $nick ($bank ${r.account.masked})"
+            }
             is ParseResult.Skip -> "⛔ IGNORED — ${r.reason}"
         }
         if (p == null) return head

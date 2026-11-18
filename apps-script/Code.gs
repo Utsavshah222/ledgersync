@@ -32,7 +32,7 @@ const FMT_NET = '"₹"#,##0.00;[Red]-"₹"#,##0.00';
 let tz_ = null;
 const TZ = () => tz_ || (tz_ = Session.getScriptTimeZone() || 'Asia/Kolkata');
 
-const API_VERSION = 3;
+const API_VERSION = 4;
 const PAGE = 25;            // default page size for the app's history lists
 const CACHE_TTL = 600;      // seconds; every write bumps REV so cached replies never go stale
 const COLORS = { header: '#1E1B4B', headerText: '#FFFFFF', credit: '#0F9D58', debit: '#D93025', band: '#F5F3FF', accent: '#6D4BFF' };
@@ -182,8 +182,9 @@ function push_(ss, body) {
       if (existing.has(id)) { results[id] = 'duplicate'; return; }
       existing.add(id);
 
-      const bank = String(t.bank || '');
-      const masked = String(t.masked || '');
+      // Phones may send a bank name the user typed; trim it so "HDFC " and "HDFC" don't become two accounts.
+      const bank = String(t.bank || '').trim();
+      const masked = String(t.masked || '').trim();
       const nick = String(t.account || '').trim() || (bank + ' ' + masked).trim() || 'Unknown';
       const dt = new Date(Number(t.ts) || Date.now());
       const credit = t.type === 'CREDIT';
