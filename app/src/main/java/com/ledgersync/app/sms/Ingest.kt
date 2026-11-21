@@ -19,7 +19,7 @@ object Ingest {
     /** Parse one SMS; store it if it's a tracked-account transaction. Returns true if newly added. */
     suspend fun ingest(ctx: Context, sender: String, body: String, ts: Long, notify: Boolean): Boolean {
         val settings = Settings.get(ctx)
-        val res = SmsParser.evaluate(sender, body, settings.accounts, settings.bankSendersOnly)
+        val res = SmsParser.evaluate(sender, body, settings.accounts, settings.bankSendersOnly, disabledBanks = settings.disabledBanks)
         if (res !is ParseResult.Ok) return false
         val p = res.parsed
         val acc = res.account
@@ -62,6 +62,7 @@ object Ingest {
             if (!hasReadSms(ctx)) return@withContext ScanResult(0, 0, 0)
             val settings = Settings.get(ctx)
             val accounts = settings.accounts
+            val disabled = settings.disabledBanks
             var scanned = 0; var matched = 0; var added = 0
             val cols = arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.DATE_SENT)
             ctx.contentResolver.query(
@@ -77,7 +78,7 @@ object Ingest {
                     val date = c.getLong(2)
                     val sent = c.getLong(3)
                     val ts = if (sent > 0) sent else date
-                    if (SmsParser.evaluate(sender, body, accounts, settings.bankSendersOnly) is ParseResult.Ok) {
+                    if (SmsParser.evaluate(sender, body, accounts, settings.bankSendersOnly, disabledBanks = disabled) is ParseResult.Ok) {
                         matched++
                         if (ingest(ctx, sender, body, ts, notify = false)) added++
                     }

@@ -58,6 +58,29 @@ class Settings private constructor(context: Context) {
 
     val accounts: List<BankAccount> get() = BankAccount.listFromJson(accountsJson)
 
+    /**
+     * Banks the user has turned OFF. An SMS whose bank is in this set is never logged to the sheet.
+     * Stored as a JSON array of bank names (matching SmsParser.knownBanks). Empty = every bank is on.
+     */
+    var disabledBanksJson: String
+        get() = sp.getString("disabledBanks", "[]") ?: "[]"
+        set(v) = sp.edit().putString("disabledBanks", v).apply()
+
+    val disabledBanks: Set<String>
+        get() = try {
+            val a = org.json.JSONArray(disabledBanksJson)
+            (0 until a.length()).mapTo(mutableSetOf()) { a.getString(it) }
+        } catch (_: Exception) { emptySet() }
+
+    fun isBankEnabled(bank: String): Boolean = bank !in disabledBanks
+
+    /** Turn a bank on or off for logging. */
+    fun setBankEnabled(bank: String, enabled: Boolean) {
+        val set = disabledBanks.toMutableSet()
+        if (enabled) set.remove(bank) else set.add(bank)
+        disabledBanksJson = org.json.JSONArray(set.toList()).toString()
+    }
+
     var accountsFetchedAt: Long
         get() = sp.getLong("accountsFetchedAt", 0)
         set(v) = sp.edit().putLong("accountsFetchedAt", v).apply()

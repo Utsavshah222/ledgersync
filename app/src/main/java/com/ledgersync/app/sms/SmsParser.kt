@@ -116,6 +116,9 @@ object SmsParser {
         return BANK_CODES.entries.firstOrNull { s.contains(it.key) }?.value
     }
 
+    /** Every bank name the app can recognise, for the per-bank on/off list in Settings. */
+    val knownBanks: List<String> = BANK_CODES.values.distinct().sorted()
+
     /** True for alphanumeric sender IDs like "VM-HDFCBK"; false for normal phone numbers. */
     fun isBusinessSender(sender: String): Boolean {
         val s = sender.replace(" ", "")
@@ -217,11 +220,21 @@ object SmsParser {
      * it names), so the sheet can auto-group by "<Bank> ••<last4>". If [accounts] still has entries (e.g. an older
      * tagged setup) a matching one is preferred so its nickname/owner are kept.
      */
-    fun evaluate(sender: String, body: String, accounts: List<BankAccount>, bankSendersOnly: Boolean, captureAll: Boolean = true): ParseResult {
+    fun evaluate(
+        sender: String,
+        body: String,
+        accounts: List<BankAccount>,
+        bankSendersOnly: Boolean,
+        captureAll: Boolean = true,
+        disabledBanks: Set<String> = emptySet(),
+    ): ParseResult {
         if (bankSendersOnly && !isBusinessSender(sender)) return ParseResult.Skip("Sender is a personal number, not a bank")
         REJECT.firstOrNull { it.first.containsMatchIn(body) }?.let { return ParseResult.Skip(it.second) }
         if (FAILED.containsMatchIn(body) && !MONEY_BACK.containsMatchIn(body)) return ParseResult.Skip("Failed / declined transaction")
         val p = parse(sender, body) ?: return ParseResult.Skip("Not a debit/credit message")
+
+        // The user can turn individual banks off in Settings; their SMS is then never logged to the sheet.
+        p.senderBank?.let { b -> if (b in disabledBanks) return ParseResult.Skip("$b is turned off in Settings", p) }
 
         matchAccount(p, accounts)?.let { return ParseResult.Ok(p, it) }
 

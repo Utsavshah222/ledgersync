@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.ledgersync.app.sms.SmsParser
 import kotlinx.coroutines.launch
 
 @Composable
@@ -153,6 +154,34 @@ fun SettingsScreen(vm: MainViewModel) {
             if (failed > 0) ActionRow(Icons.Rounded.CloudUpload, "Retry $failed failed uploads", "They are safe on this phone") { vm.syncNow(true) }
             ToggleRow(Icons.Rounded.Notifications, "Alert on each capture", "Show a notification for every saved SMS", s.notifyOnCapture) { s.notifyOnCapture = it }
             ToggleRow(Icons.Rounded.Shield, "Bank senders only", "Ignore SMS from normal phone numbers (anti-spoofing)", s.bankSendersOnly) { s.bankSendersOnly = it }
+        }
+
+        // ---------------- Banks ----------------
+        SectionHeader("Banks")
+        GlassCard {
+            Text(
+                "Turn a bank off to stop its SMS from being logged to the sheet. Banks that are on keep working exactly as before.",
+                color = LS.Muted, style = MaterialTheme.typography.bodySmall,
+            )
+            val off = s.disabledBanks.size
+            if (off > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text("$off ${if (off == 1) "bank is" else "banks are"} turned off", color = LS.Amber, style = MaterialTheme.typography.bodySmall)
+            }
+            Spacer(Modifier.height(6.dp))
+            SmsParser.knownBanks.forEach { b ->
+                val on = s.isBankEnabled(b)
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable { s.setBankEnabled(b, !on) }.padding(vertical = 8.dp, horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(b, color = if (on) LS.Text else LS.Muted, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = on, onCheckedChange = { s.setBankEnabled(b, it) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = LS.Primary, checkedThumbColor = Color.White, uncheckedTrackColor = LS.Surface3, uncheckedBorderColor = LS.Stroke),
+                    )
+                }
+            }
         }
 
         // ---------------- Import ----------------

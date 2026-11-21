@@ -320,7 +320,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun parseTest(sender: String, body: String): String {
-        val r = SmsParser.evaluate(sender.ifBlank { "VM-BANKSMS" }, body, accounts.value, settings.bankSendersOnly)
+        val r = SmsParser.evaluate(sender.ifBlank { "VM-BANKSMS" }, body, accounts.value, settings.bankSendersOnly, disabledBanks = settings.disabledBanks)
         val p = when (r) { is ParseResult.Ok -> r.parsed; is ParseResult.Skip -> r.parsed }
         val head = when (r) {
             is ParseResult.Ok -> {
