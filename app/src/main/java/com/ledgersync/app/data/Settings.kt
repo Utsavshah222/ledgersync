@@ -136,6 +136,7 @@ class Settings private constructor(context: Context) {
             "https://script.google.com/macros/s/AKfycbycALS2aqb8trvSf3PGv_NsYBagb7F0D8z3C9jo2wmZt_gtI87UyXSoEVpfm_RZ9DWv/exec",
             "https://script.google.com/macros/s/AKfycbzVXIBmhyPsPvDZHnAMIUaIuLS7S5mnGqH9AouqSorKAseR4lDKsZPfYjZkkDXs1Kzm/exec",
             "https://script.google.com/macros/s/AKfycbzTRewFI3e3V5LXSP-Sa9jkPmmtZcUpMf20F5q8n54tob11u2M8ZLzJCyX_L6K7i2ft/exec",
+            "https://script.google.com/macros/s/AKfycbw62y0KxK45xCsL7kJsuB9b8tqW8PWFfr-NLptxXxd1g0EvPP_u1m6Le6_WGpQNsnsd/exec",
         )
         @Volatile private var instance: Settings? = null
         fun get(context: Context): Settings = instance ?: synchronized(this) {
