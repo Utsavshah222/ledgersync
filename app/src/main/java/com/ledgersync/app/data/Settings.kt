@@ -81,6 +81,33 @@ class Settings private constructor(context: Context) {
         disabledBanksJson = org.json.JSONArray(set.toList()).toString()
     }
 
+    /**
+     * A nickname the user gave an individual bank during setup, keyed by the bank name (SmsParser.knownBanks).
+     * When a bank has a nickname here, every SMS from that bank is filed under this exact name in the sheet's
+     * "Bank" column and account group — e.g. "HDFC Bank" → "HDFC Current". Blank / absent = use the bank's own
+     * name. Stored as a JSON object {bank: nickname}. Takes priority over the phone-wide [bankName].
+     */
+    var bankNicknamesJson: String
+        get() = sp.getString("bankNicknames", "{}") ?: "{}"
+        set(v) = sp.edit().putString("bankNicknames", v).apply()
+
+    val bankNicknames: Map<String, String>
+        get() = try {
+            val o = org.json.JSONObject(bankNicknamesJson)
+            o.keys().asSequence().associateWith { o.getString(it).trim() }.filterValues { it.isNotBlank() }
+        } catch (_: Exception) { emptyMap() }
+
+    /** The nickname set for [bank], or blank if none. */
+    fun nicknameFor(bank: String): String = bankNicknames[bank] ?: ""
+
+    /** Set (or, when blank / same as the bank's own name, clear) the nickname for one bank. */
+    fun setBankNickname(bank: String, nickname: String) {
+        val o = try { org.json.JSONObject(bankNicknamesJson) } catch (_: Exception) { org.json.JSONObject() }
+        val n = nickname.trim()
+        if (n.isBlank() || n == bank) o.remove(bank) else o.put(bank, n)
+        bankNicknamesJson = o.toString()
+    }
+
     var accountsFetchedAt: Long
         get() = sp.getLong("accountsFetchedAt", 0)
         set(v) = sp.edit().putLong("accountsFetchedAt", v).apply()

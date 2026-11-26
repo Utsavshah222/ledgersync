@@ -58,6 +58,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.toMutableStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -95,6 +96,7 @@ fun SettingsScreen(vm: MainViewModel) {
     var labBody by remember { mutableStateOf("") }
     var labOut by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
+    val bankNames = remember { SmsParser.knownBanks.map { it to s.nicknameFor(it).ifBlank { it } }.toMutableStateMap() }
     val appVersion = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "" }
     var batteryOk by remember { mutableStateOf(isIgnoringBattery(ctx)) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { batteryOk = isIgnoringBattery(ctx) }
@@ -160,7 +162,7 @@ fun SettingsScreen(vm: MainViewModel) {
         SectionHeader("Banks")
         GlassCard {
             Text(
-                "Turn a bank off to stop its SMS from being logged to the sheet. Banks that are on keep working exactly as before.",
+                "Turn a bank off to stop its SMS from being logged to the sheet, and give each bank the name it should show as in the sheet's “Bank” column.",
                 color = LS.Muted, style = MaterialTheme.typography.bodySmall,
             )
             val off = s.disabledBanks.size
@@ -180,6 +182,14 @@ fun SettingsScreen(vm: MainViewModel) {
                         checked = on, onCheckedChange = { s.setBankEnabled(b, it) },
                         colors = SwitchDefaults.colors(checkedTrackColor = LS.Primary, checkedThumbColor = Color.White, uncheckedTrackColor = LS.Surface3, uncheckedBorderColor = LS.Stroke),
                     )
+                }
+                if (on) {
+                    LsTextField(
+                        bankNames[b] ?: b,
+                        { bankNames[b] = it; s.setBankNickname(b, it.ifBlank { b }) },
+                        "Name in sheet", leading = Icons.Rounded.AccountBalance,
+                    )
+                    Spacer(Modifier.height(8.dp))
                 }
             }
         }

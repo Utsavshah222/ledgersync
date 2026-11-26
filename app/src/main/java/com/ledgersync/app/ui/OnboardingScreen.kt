@@ -20,6 +20,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,6 +58,8 @@ import androidx.compose.material.icons.rounded.Verified
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -68,6 +71,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.toMutableStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,6 +86,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.ledgersync.app.sms.SmsParser
 import kotlinx.coroutines.launch
 
 @Composable
@@ -90,7 +95,7 @@ fun OnboardingScreen(vm: MainViewModel) {
     Column(Modifier.fillMaxSize().background(LS.Bg).statusBarsPadding().navigationBarsPadding().imePadding()) {
         // progress dots
         Row(Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.Center) {
-            repeat(4) { i ->
+            repeat(6) { i ->
                 val c by animateColorAsState(if (i <= step) LS.Primary else LS.Surface3, label = "dot")
                 Box(Modifier.padding(horizontal = 4.dp).height(6.dp).width(if (i == step) 28.dp else 10.dp).clip(RoundedCornerShape(50)).background(c))
             }
@@ -109,6 +114,8 @@ fun OnboardingScreen(vm: MainViewModel) {
                 0 -> WelcomeStep { step = 1 }
                 1 -> PermissionStep { step = 2 }
                 2 -> ConnectStep(vm, onBack = { step = 1 }) { step = 3 }
+                3 -> ChooseBanksStep(vm, onBack = { step = 2 }) { step = 4 }
+                4 -> NameBanksStep(vm, onBack = { step = 3 }) { step = 5 }
                 else -> ImportStep(vm)
             }
         }
@@ -281,6 +288,83 @@ private fun ConnectStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Uni
                     busy = false
                 }
             }
+        })
+        Spacer(Modifier.height(8.dp))
+        TextButton(onBack, Modifier.align(Alignment.CenterHorizontally)) { Text("Back", color = LS.Muted) }
+    }
+}
+
+@Composable
+private fun ChooseBanksStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Unit) {
+    val banks = remember { SmsParser.knownBanks }
+    val enabled = remember { banks.map { it to vm.settings.isBankEnabled(it) }.toMutableStateMap() }
+    val onCount = enabled.count { it.value }
+
+    StepScaffold {
+        Spacer(Modifier.height(16.dp))
+        Text("Which banks should sync?", style = MaterialTheme.typography.headlineMedium, color = LS.Text)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Turn on only the banks you want in your sheet. SMS from banks left off is never captured or uploaded — nothing is sent until you finish setup.",
+            color = LS.Muted, style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(18.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("$onCount of ${banks.size} on", color = LS.PrimarySoft, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            TextButton({ banks.forEach { enabled[it] = true } }) { Text("All on", color = LS.PrimarySoft) }
+            TextButton({ banks.forEach { enabled[it] = false } }) { Text("Clear", color = LS.Muted) }
+        }
+        Spacer(Modifier.height(4.dp))
+        banks.forEach { b ->
+            val on = enabled[b] == true
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(LS.Surface)
+                    .clickable { enabled[b] = !on }.padding(vertical = 10.dp, horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(b, color = if (on) LS.Text else LS.Muted, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                Switch(
+                    checked = on, onCheckedChange = { enabled[b] = it },
+                    colors = SwitchDefaults.colors(checkedTrackColor = LS.Primary, checkedThumbColor = Color.White, uncheckedTrackColor = LS.Surface3, uncheckedBorderColor = LS.Stroke),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton("Continue", enabled = onCount > 0, icon = Icons.Rounded.ArrowForward, onClick = {
+            banks.forEach { vm.settings.setBankEnabled(it, enabled[it] == true) }
+            onNext()
+        })
+        Spacer(Modifier.height(8.dp))
+        TextButton(onBack, Modifier.align(Alignment.CenterHorizontally)) { Text("Back", color = LS.Muted) }
+    }
+}
+
+@Composable
+private fun NameBanksStep(vm: MainViewModel, onBack: () -> Unit, onNext: () -> Unit) {
+    val banks = remember { SmsParser.knownBanks.filter { vm.settings.isBankEnabled(it) } }
+    val names = remember { banks.map { it to vm.settings.nicknameFor(it).ifBlank { it } }.toMutableStateMap() }
+
+    StepScaffold {
+        Spacer(Modifier.height(16.dp))
+        Text("Name your banks", style = MaterialTheme.typography.headlineMedium, color = LS.Text)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "This is the name each bank shows as in your sheet's “Bank” column — e.g. “HDFC Current” or “SBI Payroll”. The account's last 4 digits are added automatically. Keep the default if you like.",
+            color = LS.Muted, style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(20.dp))
+        banks.forEach { b ->
+            LsTextField(
+                names[b] ?: b, { names[b] = it }, b,
+                leading = Icons.Rounded.AccountBalance,
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+        PrimaryButton("Continue", icon = Icons.Rounded.ArrowForward, onClick = {
+            banks.forEach { b -> vm.settings.setBankNickname(b, (names[b] ?: "").ifBlank { b }) }
+            onNext()
         })
         Spacer(Modifier.height(8.dp))
         TextButton(onBack, Modifier.align(Alignment.CenterHorizontally)) { Text("Back", color = LS.Muted) }

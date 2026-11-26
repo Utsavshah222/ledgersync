@@ -23,11 +23,12 @@ object Ingest {
         if (res !is ParseResult.Ok) return false
         val p = res.parsed
         val acc = res.account
-        // A bank name the user set for this phone always wins, so every SMS from this device is filed under
-        // the same name in the sheet. Blank = keep the name auto-detected from the sender. The account key
-        // (txnKey) is built from the account digits only, so this never affects duplicate detection.
-        val override = settings.bankName
-        val bank = override.ifBlank { acc.bank.ifBlank { p.senderBank ?: "" } }
+        // Name shown in the sheet. Priority: the nickname the user gave THIS bank in setup, then a phone-wide
+        // bank name, then the name auto-detected from the sender. The account key (txnKey) is built from the
+        // account digits only, so none of this ever affects duplicate detection.
+        val detectedBank = acc.bank.ifBlank { p.senderBank ?: "" }
+        val override = settings.nicknameFor(detectedBank).ifBlank { settings.bankName }
+        val bank = override.ifBlank { detectedBank }
         val nick = if (override.isNotBlank()) {
             val last4 = acc.digits.takeLast(4)
             if (last4.isNotEmpty()) "$override ••$last4" else override

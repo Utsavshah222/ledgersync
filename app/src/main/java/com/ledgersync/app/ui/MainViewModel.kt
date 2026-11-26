@@ -324,8 +324,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val p = when (r) { is ParseResult.Ok -> r.parsed; is ParseResult.Skip -> r.parsed }
         val head = when (r) {
             is ParseResult.Ok -> {
-                // Mirror Ingest: a bank name set for this phone wins over the auto-detected one.
-                val override = settings.bankName
+                // Mirror Ingest: a per-bank nickname wins, then a phone-wide name, then the auto-detected one.
+                val detectedBank = r.account.bank.ifBlank { r.parsed.senderBank ?: "" }
+                val override = settings.nicknameFor(detectedBank).ifBlank { settings.bankName }
                 val bank = override.ifBlank { r.account.bank }
                 val nick = if (override.isNotBlank()) {
                     val last4 = r.account.digits.takeLast(4)
